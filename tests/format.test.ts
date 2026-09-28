@@ -4,6 +4,7 @@ import {
   bandLabel,
   formatAge,
   formatDate,
+  formatMacroChange,
   formatNumberCompact,
   formatPercent,
   formatPrice,
@@ -120,5 +121,26 @@ describe("formatDate", () => {
   it("extracts the ISO date portion", () => {
     expect(formatDate("2026-01-05T18:00:00.000Z")).toBe("2026-01-05");
     expect(formatDate("")).toBe("—");
+  });
+});
+
+describe("formatMacroChange", () => {
+  it("renders rate series in basis points", () => {
+    expect(formatMacroChange("US10Y", -0.02, "%")).toBe("-2bp");
+    expect(formatMacroChange("US10Y", 0.023, "%")).toBe("+2.3bp");
+    expect(formatMacroChange("CPI_YOY", 0, "%")).toBe("0bp");
+  });
+
+  it("renders rate series with a non-percent unit as a signed absolute", () => {
+    expect(formatMacroChange("NFP_CHANGE", 12, "k")).toBe("+12.0k");
+  });
+
+  it("renders level series as a signed percent", () => {
+    expect(formatMacroChange("SP500", -0.24, "%")).toBe("-0.24%");
+    expect(formatMacroChange("NASDAQ", 0.5, "%")).toBe("+0.50%");
+  });
+
+  it("renders a placeholder for missing values", () => {
+    expect(formatMacroChange("SP500", null, "%")).toBe("—");
   });
 });

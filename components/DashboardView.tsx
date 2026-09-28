@@ -229,7 +229,7 @@ export function DashboardView({
   );
 
   const leftRail = (
-    <div className="space-y-3">
+    <div className="min-w-0 space-y-3">
       <Panel title={COPY.dashboard.watchlist}>
         {watchlists.length > 0 ? (
           <select
@@ -291,7 +291,7 @@ export function DashboardView({
   );
 
   const rightRail = (
-    <div className="space-y-3">
+    <div className="min-w-0 space-y-3">
       <Panel
         title={selectedList ? selectedList.name : COPY.dashboard.watchlist}
         action={
@@ -301,7 +301,7 @@ export function DashboardView({
         }
       >
         {selectedList && selectedList.stocks.length > 0 ? (
-          <WatchlistTable stocks={selectedList.stocks} />
+          <WatchlistTable stocks={selectedList.stocks} variant="rail" />
         ) : (
           <p className="text-xs text-muted">No tickers in this watchlist.</p>
         )}
@@ -390,7 +390,7 @@ export function DashboardView({
         {rightRail}
       </div>
 
-      <div className="space-y-3 xl:hidden">
+      <div className="min-w-0 space-y-3 xl:hidden">
         {tab === "feed" ? feed : null}
         {tab === "context" ? leftRail : null}
         {tab === "alerts" ? rightRail : null}

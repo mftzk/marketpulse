@@ -10,7 +10,7 @@ import {
   priceSnapshots,
   sectors,
 } from "@/lib/db/schema";
-import { deriveRegime, type MacroPoint } from "@/lib/market/macro";
+import { deriveMacroChange, deriveRegime, macroChangeUnit, type MacroPoint } from "@/lib/market/macro";
 import { num } from "@/lib/services/shared";
 
 async function latestPrice(ticker: string): Promise<(typeof priceSnapshots.$inferSelect) | null> {
@@ -84,16 +84,29 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
       macroLatest.set(m.series, m);
     }
   }
-  const macroPoints: MacroPoint[] = [...macroLatest.values()].map((m) => ({
-    series: m.series as MacroPoint["series"],
-    value: Number(m.value),
-    previousValue: num(m.previousValue),
-    change: num(m.change),
-    unit: m.unit,
-  }));
+  const macroPoints: MacroPoint[] = [...macroLatest.values()].map((m) => {
+    const value = Number(m.value);
+    const previous = num(m.previousValue);
+    return {
+      series: m.series as MacroPoint["series"],
+      value,
+      previousValue: previous,
+      change: deriveMacroChange(m.series, value, previous, num(m.change)),
+      unit: macroChangeUnit(m.series, m.unit),
+    };
+  });
 
   const macro = Object.fromEntries(
-    macroPoints.map((m) => [m.series, { value: m.value, previous: m.previousValue, change: m.change, unit: m.unit, as_of: macroLatest.get(m.series)?.ts?.toISOString() ?? null }]),
+    macroPoints.map((m) => [
+      m.series,
+      {
+        value: m.value,
+        previous: m.previousValue ?? null,
+        change: m.change ?? null,
+        unit: m.unit ?? null,
+        as_of: macroLatest.get(m.series)?.ts?.toISOString() ?? null,
+      },
+    ]),
   );
 
   const vixRows = await db
@@ -117,6 +130,7 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
     }
   }
 
+  const vixMacro = macroPoints.find((m) => m.series === "VIX");
   return {
     as_of: now.toISOString(),
     session: sessionFor(now),
@@ -124,7 +138,7 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
       { symbol: "SPY", change_pct: num(spy?.changePctDaily), price: num(spy?.price) },
       { symbol: "QQQ", change_pct: num(qqq?.changePctDaily), price: num(qqq?.price) },
       { symbol: "SOXX", change_pct: num(soxx?.changePctDaily), price: num(soxx?.price) },
-      { symbol: "VIX", value: num(vix[0]?.value), change: num(vix[0]?.change) },
+      { symbol: "VIX", value: num(vix[0]?.value), change: vixMacro?.change ?? num(vix[0]?.change) },
     ],
     sectors: sectorsData,
     macro,

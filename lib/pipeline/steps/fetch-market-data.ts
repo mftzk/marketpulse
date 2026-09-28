@@ -3,6 +3,12 @@ import { desc, eq, sql } from "drizzle-orm";
 import { etWallClock, sessionFor } from "@/lib/core/session";
 import { computeConditions, computeTechnicals } from "@/lib/market/technical";
 import { volumeProfileFraction } from "@/lib/market/rvol";
+import {
+  MACRO_LEVEL_TRACKING,
+  deriveMacroChange,
+  macroChangeUnit,
+  macroLevelFromEtf,
+} from "@/lib/market/macro";
 import { BROAD_BENCHMARKS, SECTOR_ETF_BY_SLUG } from "@/lib/market/relative-strength";
 import { macroSnapshots, priceSnapshots, sectors, stocks, technicalSnapshots, volumeSnapshots } from "@/lib/db/schema";
 import type { Bar, DailyStats } from "@/lib/providers/types";
@@ -31,25 +37,16 @@ interface MacroSeriesConfig {
 }
 
 const MACRO_SERIES: MacroSeriesConfig[] = [
-  { series: "VIX", base: 15, unit: "", spread: 3, reversion: 0.15 },
+  { series: "VIX", base: 15, unit: "%", spread: 3, reversion: 0.15 },
   { series: "US10Y", base: 4.2, unit: "%", spread: 0.25, reversion: 0.12 },
-  { series: "DXY", base: 103, unit: "", spread: 1.5, reversion: 0.1 },
-  { series: "SP500", base: 5921, unit: "", spread: 40, reversion: 0.08 },
-  { series: "NASDAQ", base: 21008, unit: "", spread: 160, reversion: 0.08 },
-  { series: "SOXX", base: 254.8, unit: "", spread: 4, reversion: 0.08 },
-  { series: "XLK", base: 268.1, unit: "", spread: 3, reversion: 0.08 },
-  { series: "XLC", base: 104.2, unit: "", spread: 1.5, reversion: 0.08 },
-  { series: "XLY", base: 218.4, unit: "", spread: 3, reversion: 0.08 },
+  { series: "DXY", base: 103, unit: "%", spread: 1.5, reversion: 0.1 },
+  { series: "SP500", base: 5921, unit: "%", spread: 40, reversion: 0.08 },
+  { series: "NASDAQ", base: 21008, unit: "%", spread: 160, reversion: 0.08 },
+  { series: "SOXX", base: 254.8, unit: "%", spread: 4, reversion: 0.08 },
+  { series: "XLK", base: 268.1, unit: "%", spread: 3, reversion: 0.08 },
+  { series: "XLC", base: 104.2, unit: "%", spread: 1.5, reversion: 0.08 },
+  { series: "XLY", base: 218.4, unit: "%", spread: 3, reversion: 0.08 },
 ];
-
-const MACRO_BASE_TICKER: Partial<Record<MacroSeriesConfig["series"], { ticker: string; scale: number }>> = {
-  SP500: { ticker: "SPY", scale: 10 },
-  NASDAQ: { ticker: "QQQ", scale: 40 },
-  SOXX: { ticker: "SOXX", scale: 1 },
-  XLK: { ticker: "XLK", scale: 1 },
-  XLC: { ticker: "XLC", scale: 1 },
-  XLY: { ticker: "XLY", scale: 1 },
-};
 
 export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> {
   const started = Date.now();
@@ -279,12 +276,13 @@ async function advanceMacro(ctx: PipelineContext): Promise<void> {
   }
 
   for (const config of MACRO_SERIES) {
-    const tracked = MACRO_BASE_TICKER[config.series];
     let base = config.base;
+    const tracked = MACRO_LEVEL_TRACKING[config.series];
     if (tracked) {
       const quote = await ctx.providers.market.quote(tracked.ticker, ctx.now);
-      if (quote) {
-        base = quote.price * tracked.scale;
+      const level = quote ? macroLevelFromEtf(config.series, quote.price) : null;
+      if (level !== null) {
+        base = level;
       }
     }
     const previous = latest.get(config.series);
@@ -295,6 +293,7 @@ async function advanceMacro(ctx: PipelineContext): Promise<void> {
       10;
     const next = prevValue + (base - prevValue) * config.reversion + noise;
     const value = round(next, config.series === "US10Y" ? 2 : config.series === "VIX" ? 1 : 1);
+    const change = deriveMacroChange(config.series, value, prevValue, value - prevValue);
 
     await ctx.db
       .insert(macroSnapshots)
@@ -303,8 +302,8 @@ async function advanceMacro(ctx: PipelineContext): Promise<void> {
         ts: ctx.now,
         value: String(value),
         previousValue: String(round(prevValue, 4)),
-        change: String(round(value - prevValue, 4)),
-        unit: config.unit,
+        change: change === null ? null : String(change),
+        unit: macroChangeUnit(config.series, config.unit),
       })
       .onConflictDoNothing();
   }

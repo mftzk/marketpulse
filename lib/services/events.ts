@@ -27,7 +27,7 @@ import {
   latestPriceSnapshots,
   type ReactionInputs,
 } from "@/lib/db/queries/market-data";
-import { deriveRegime, type MacroPoint } from "@/lib/market/macro";
+import { deriveMacroChange, deriveRegime, macroChangeUnit, type MacroPoint } from "@/lib/market/macro";
 import { getMarketDataProvider } from "@/lib/providers";
 import {
   buildEventInterpretation,
@@ -530,13 +530,17 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       macroLatest.set(m.series, m);
     }
   }
-  const macroPoints: MacroPoint[] = [...macroLatest.values()].map((m) => ({
-    series: m.series as MacroPoint["series"],
-    value: Number(m.value),
-    previousValue: num(m.previousValue),
-    change: num(m.change),
-    unit: m.unit,
-  }));
+  const macroPoints: MacroPoint[] = [...macroLatest.values()].map((m) => {
+    const value = Number(m.value);
+    const previous = num(m.previousValue);
+    return {
+      series: m.series as MacroPoint["series"],
+      value,
+      previousValue: previous,
+      change: deriveMacroChange(m.series, value, previous, num(m.change)),
+      unit: macroChangeUnit(m.series, m.unit),
+    };
+  });
   const vixRows = await latestVixRows(20);
   const vixMean = vixRows.length > 0 ? vixRows.reduce((acc, r) => acc + Number(r.value), 0) / vixRows.length : null;
 

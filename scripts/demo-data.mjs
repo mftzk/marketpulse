@@ -280,18 +280,18 @@ export const ANCHOR_PRICES = {
 };
 
 const MACRO_SERIES = [
-  { series: "FED_FUNDS_RATE", base: 5.25, unit: "%", digits: 2 },
-  { series: "CPI_YOY", base: 3.1, unit: "%", digits: 1 },
-  { series: "PCE_YOY", base: 2.6, unit: "%", digits: 1 },
-  { series: "NFP_CHANGE", base: 210, unit: "k", digits: 0 },
-  { series: "UNEMPLOYMENT", base: 3.9, unit: "%", digits: 1 },
-  { series: "GDP_QOQ", base: 2.8, unit: "%", digits: 1 },
-  { series: "US10Y", base: 4.2, unit: "%", digits: 2 },
-  { series: "DXY", base: 103.4, unit: "", digits: 1 },
-  { series: "VIX", base: 14.2, unit: "", digits: 1 },
-  { series: "SP500", base: 5921, unit: "", digits: 1 },
-  { series: "NASDAQ", base: 21008, unit: "", digits: 1 },
-  { series: "SOXX", base: 254.8, unit: "", digits: 1 },
+  { series: "FED_FUNDS_RATE", base: 5.25, unit: "%", digits: 2, kind: "rate" },
+  { series: "CPI_YOY", base: 3.1, unit: "%", digits: 1, kind: "rate" },
+  { series: "PCE_YOY", base: 2.6, unit: "%", digits: 1, kind: "rate" },
+  { series: "NFP_CHANGE", base: 210, unit: "k", digits: 0, kind: "rate" },
+  { series: "UNEMPLOYMENT", base: 3.9, unit: "%", digits: 1, kind: "rate" },
+  { series: "GDP_QOQ", base: 2.8, unit: "%", digits: 1, kind: "rate" },
+  { series: "US10Y", base: 4.2, unit: "%", digits: 2, kind: "rate" },
+  { series: "DXY", base: 103.4, unit: "%", digits: 1, kind: "level" },
+  { series: "VIX", base: 14.2, unit: "%", digits: 1, kind: "level" },
+  { series: "SP500", base: 5921, unit: "%", digits: 1, kind: "level" },
+  { series: "NASDAQ", base: 21008, unit: "%", digits: 1, kind: "level" },
+  { series: "SOXX", base: 254.8, unit: "%", digits: 1, kind: "level" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -1087,13 +1087,19 @@ export function buildDataset({ now }) {
       const ts = new Date(days[d].getTime() + 15 * 60 * 60 * 1000);
       const drift = (rng() - 0.5) * series.base * 0.02;
       const value = round(series.base + drift * (d + 1), series.digits);
+      const change =
+        series.kind === "level"
+          ? previous === 0
+            ? 0
+            : round(((value - previous) / previous) * 100, 2)
+          : round(value - previous, series.digits);
       macroSnapshots.push({
         id: uuidFromRng(rng),
         series: series.series,
         ts: ts.toISOString(),
         value,
         previousValue: previous,
-        change: round(value - previous, series.digits),
+        change,
         unit: series.unit,
       });
       previous = value;

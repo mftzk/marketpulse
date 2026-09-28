@@ -37,6 +37,89 @@ export interface Regime {
   evidence: string[];
 }
 
+/**
+ * How a macro series' `change` is expressed. "level" series (index handles,
+ * vol, dollar) report a percent change versus `previous`; "rate" series report
+ * an absolute change in the series' own unit (percentage points for yields and
+ * inflation prints, thousands for NFP).
+ */
+export type MacroSeriesKind = "level" | "rate";
+
+const RATE_SERIES: readonly MacroSeries[] = [
+  "FED_FUNDS_RATE",
+  "CPI_YOY",
+  "PCE_YOY",
+  "NFP_CHANGE",
+  "UNEMPLOYMENT",
+  "GDP_QOQ",
+  "US10Y",
+];
+
+export function macroSeriesKind(series: string): MacroSeriesKind {
+  return (RATE_SERIES as readonly string[]).includes(series) ? "rate" : "level";
+}
+
+/**
+ * Index-level series that must track the mock market levels (so the macro panel
+ * and the index strip agree). `scale` converts the tracked ETF price into the
+ * series level, e.g. SP500 ≈ SPY × 10, NASDAQ ≈ QQQ × 40.
+ */
+export const MACRO_LEVEL_TRACKING: Partial<Record<MacroSeries, { ticker: string; scale: number }>> = {
+  SP500: { ticker: "SPY", scale: 10 },
+  NASDAQ: { ticker: "QQQ", scale: 40 },
+  SOXX: { ticker: "SOXX", scale: 1 },
+  XLK: { ticker: "XLK", scale: 1 },
+  XLC: { ticker: "XLC", scale: 1 },
+  XLY: { ticker: "XLY", scale: 1 },
+};
+
+/** Level for a tracked index series given its ETF price, or `null` if untracked. */
+export function macroLevelFromEtf(series: string, etfPrice: number): number | null {
+  const tracked = MACRO_LEVEL_TRACKING[series as MacroSeries];
+  if (!tracked || !isFiniteNumber(etfPrice)) {
+    return null;
+  }
+  return etfPrice * tracked.scale;
+}
+
+function roundTo(value: number, digits: number): number {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+/**
+ * Normalises the reported `change` for a series regardless of what is stored:
+ * level series derive a percent change from `value`/`previous`, rate series
+ * derive the absolute delta. Falls back to the stored value when `previous` is
+ * unavailable. This keeps old rows rendering with the correct semantics.
+ */
+export function deriveMacroChange(
+  series: string,
+  value: number,
+  previous: number | null | undefined,
+  storedChange?: number | null,
+): number | null {
+  if (isFiniteNumber(value) && isFiniteNumber(previous)) {
+    if (macroSeriesKind(series) === "level") {
+      return previous === 0 ? (isFiniteNumber(storedChange) ? storedChange : null) : roundTo(((value - previous) / previous) * 100, 2);
+    }
+    return roundTo(value - previous, 4);
+  }
+  return isFiniteNumber(storedChange) ? storedChange : null;
+}
+
+/**
+ * The unit that describes the derived `change` for a series: level series are
+ * always a percent; rate series keep their stored unit (percentage points for
+ * yields/inflation, thousands for NFP) and default to `%`.
+ */
+export function macroChangeUnit(series: string, storedUnit?: string | null): string {
+  if (macroSeriesKind(series) === "level") {
+    return "%";
+  }
+  return storedUnit && storedUnit.length > 0 ? storedUnit : "%";
+}
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }

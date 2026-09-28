@@ -1,4 +1,5 @@
 import type { ImpactBand } from "@/lib/core/dto";
+import { macroSeriesKind } from "@/lib/market/macro";
 
 /**
  * Number/time formatting helpers shared by the server-rendered pages and the
@@ -95,6 +96,37 @@ export function formatSignedPp(value: number | null | undefined, digits = 1): st
   const rounded = Number(value.toFixed(digits));
   const sign = rounded >= 0 ? "+" : "";
   return `${sign}${rounded.toFixed(digits)}pp`;
+}
+
+/**
+ * Formats a macro series `change` with the semantics of its series kind.
+ *
+ * - Rate series whose unit is `%` (yields, inflation, funds rate) are expressed
+ *   in basis points, e.g. `-0.02` pp → `-2bp`.
+ * - Rate series with another unit (e.g. NFP in thousands) keep the absolute
+ *   delta and unit, e.g. `+12k`.
+ * - Level/index series are a signed percent, e.g. `-0.24%`.
+ */
+export function formatMacroChange(
+  series: string,
+  change: number | null | undefined,
+  unit?: string | null,
+): string {
+  if (!isNum(change)) {
+    return EMPTY;
+  }
+  if (macroSeriesKind(series) === "rate") {
+    if (unit && unit !== "%") {
+      const rounded = Number(change.toFixed(1));
+      const sign = rounded > 0 ? "+" : "";
+      return `${sign}${rounded.toFixed(1)}${unit}`;
+    }
+    const bp = Number((change * 100).toFixed(1));
+    const sign = bp > 0 ? "+" : bp < 0 ? "-" : "";
+    const abs = Math.abs(bp);
+    return `${sign}${Number.isInteger(abs) ? abs.toFixed(0) : abs.toFixed(1)}bp`;
+  }
+  return formatPercent(change, 2);
 }
 
 const BAND_LABELS: Record<ImpactBand, string> = {

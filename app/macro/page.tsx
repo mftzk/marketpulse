@@ -4,7 +4,8 @@ import { RegimeChip } from "@/components/RegimeChip";
 import { EmptyState } from "@/components/EmptyState";
 import { MOVEMENT_TEXT, movementTone } from "@/components/movement";
 import { COPY } from "@/lib/copy";
-import { formatClockEt, formatPercent } from "@/lib/format";
+import { formatClockEt, formatMacroChange, formatPercent } from "@/lib/format";
+import { macroSeriesKind } from "@/lib/market/macro";
 import { safeCall } from "@/lib/safe";
 import { getMarketContext } from "@/lib/services/market-context";
 import type { MarketContextView } from "@/lib/view-types";
@@ -51,6 +52,7 @@ export default async function MacroPage() {
             <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4">
               {seriesKeys.map((key) => {
                 const entry = context.macro[key];
+                const showUnit = macroSeriesKind(key) === "rate" && Boolean(entry.unit);
                 return (
                   <div key={key} className="border border-hairline bg-panel-alt p-2">
                     <div className="font-mono text-[10px] uppercase tracking-wide text-muted">
@@ -58,12 +60,12 @@ export default async function MacroPage() {
                     </div>
                     <div className="mt-1 font-mono text-base text-ink">
                       {entry.value.toFixed(Math.abs(entry.value) >= 100 ? 1 : 2)}
-                      {entry.unit ? (
+                      {showUnit ? (
                         <span className="ml-1 text-[11px] text-muted">{entry.unit}</span>
                       ) : null}
                     </div>
                     <div className={`font-mono text-[11px] ${MOVEMENT_TEXT[movementTone(entry.change)]}`}>
-                      {formatPercent(entry.change)}
+                      {formatMacroChange(key, entry.change, entry.unit)}
                     </div>
                     <div className="mt-0.5 font-mono text-[10px] text-muted">
                       prev {entry.previous === null ? "—" : entry.previous.toFixed(2)}

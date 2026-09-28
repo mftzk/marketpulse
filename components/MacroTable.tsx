@@ -1,4 +1,5 @@
-import { formatClockEt, formatPercent, formatPrice } from "@/lib/format";
+import { formatClockEt, formatMacroChange, formatPrice } from "@/lib/format";
+import { macroSeriesKind } from "@/lib/market/macro";
 import type { MacroValueView } from "@/lib/view-types";
 
 import { MOVEMENT_TEXT, movementTone } from "./movement";
@@ -44,15 +45,16 @@ export function MacroTable({ macro, order, limit }: MacroTableProps) {
           {shown.map((key) => {
             const entry = macro[key];
             const digits = Math.abs(entry.value) >= 100 ? 1 : 2;
+            const showUnit = macroSeriesKind(key) === "rate" && Boolean(entry.unit);
             return (
               <tr key={key} className="border-b border-hairline last:border-0">
                 <td className="py-1.5 pr-3 font-mono text-muted">{key}</td>
                 <td className="py-1.5 pr-3 text-right font-mono text-ink">
                   {formatPrice(entry.value, digits)}
-                  {entry.unit ? <span className="ml-1 text-muted">{entry.unit}</span> : null}
+                  {showUnit ? <span className="ml-1 text-muted">{entry.unit}</span> : null}
                 </td>
                 <td className={`py-1.5 pr-3 text-right font-mono ${MOVEMENT_TEXT[movementTone(entry.change)]}`}>
-                  {formatPercent(entry.change)}
+                  {formatMacroChange(key, entry.change, entry.unit)}
                 </td>
                 <td className="py-1.5 text-right font-mono text-[10px] text-muted">
                   {formatClockEt(entry.as_of)}

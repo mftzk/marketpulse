@@ -121,12 +121,19 @@ export function IntradayChart({ bars, markers = [], height = 360, ticker }: Intr
             const time = nearestBarTime(barTimes, marker.time) as UTCTimestamp;
             const negative = marker.catalyst_direction === "negative";
             const positive = marker.catalyst_direction === "positive";
+            // Only label higher-impact markers so dense days do not collide;
+            // every marker still renders (shape/colour/tooltip remain intact).
+            const label =
+              marker.impact_score >= 60
+                ? `${marker.label} · ${marker.impact_score.toFixed(0)}`
+                : "";
             return {
               time,
               position: negative ? "aboveBar" : "belowBar",
               color: positive ? "#3ddc84" : negative ? "#ff5c5c" : "#ffb000",
               shape: positive ? "arrowUp" : negative ? "arrowDown" : "circle",
-              text: `${marker.label}${marker.impact_score ? ` ${marker.impact_score.toFixed(0)}` : ""}`,
+              id: marker.event_id,
+              text: label,
             } satisfies SeriesMarkerBar<Time>;
           })
           .sort((a, b) => (a.time as number) - (b.time as number));
