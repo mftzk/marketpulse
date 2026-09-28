@@ -15,5 +15,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // A valid signing key for the auth suites. This is a test-only value and is
+    // never used outside the vitest process.
+    env: { AUTH_ENABLED: "1", SESSION_SECRET: "vitest-session-secret-0123456789abcdef" },
   },
 });

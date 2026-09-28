@@ -839,7 +839,7 @@ export function buildDataset({ now }) {
   const users = [
     {
       id: uuidFromRng(rng),
-      email: "demo@marketpulse.dev",
+      email: "trader@marketpulse.dev",
       displayName: "Demo Trader",
       isDemo: true,
       riskProfile: "active",

@@ -119,6 +119,8 @@ export const users = pgTable("users", {
   isDemo: boolean("is_demo").notNull().default(false),
   riskProfile: text("risk_profile"),
   prefs: jsonb("prefs").$type<Record<string, unknown>>().notNull().default({}),
+  passwordHash: text("password_hash"),
+  lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

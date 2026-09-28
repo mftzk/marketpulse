@@ -20,6 +20,33 @@ const BASE_URL = (process.env.BASE_URL || process.argv[2] || "http://127.0.0.1:3
 
 const RUNS = 3;
 
+const EMAIL = process.env.SMOKE_EMAIL || "trader@marketpulse.dev";
+const PASSWORD = process.env.SMOKE_PASSWORD || "marketpulse-demo";
+
+/** Session cookie header for the gated endpoints (empty when auth is disabled). */
+let SESSION_HEADER = "";
+
+async function signIn() {
+  try {
+    const response = await fetch(`${BASE_URL}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: EMAIL, password: PASSWORD }),
+    });
+    if (!response.ok) {
+      console.log(`bench: login failed (${response.status}) — measuring anonymously`);
+      return;
+    }
+    const setCookie = response.headers.get("set-cookie");
+    const match = setCookie?.match(/mp_session=[^;]+/);
+    if (match) {
+      SESSION_HEADER = match[0];
+    }
+  } catch {
+    console.log("bench: login request failed — measuring anonymously");
+  }
+}
+
 /** endpoint → budget in milliseconds. */
 const BUDGETS = [
   { path: "/api/events?limit=15", budgetMs: 400 },
@@ -46,7 +73,10 @@ async function measure(path) {
   for (let i = 0; i < RUNS; i += 1) {
     const started = process.hrtime.bigint();
     try {
-      const response = await fetch(`${BASE_URL}${path}`, { cache: "no-store" });
+      const response = await fetch(`${BASE_URL}${path}`, {
+        cache: "no-store",
+        headers: SESSION_HEADER ? { cookie: SESSION_HEADER } : {},
+      });
       const text = await response.text();
       const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
       times.push(elapsedMs);
@@ -61,11 +91,16 @@ async function measure(path) {
 
 async function warmUp(path) {
   try {
-    await fetch(`${BASE_URL}${path}`, { cache: "no-store" });
+    await fetch(`${BASE_URL}${path}`, {
+      cache: "no-store",
+      headers: SESSION_HEADER ? { cookie: SESSION_HEADER } : {},
+    });
   } catch {
     // A warm-up failure is reported by the measured runs that follow.
   }
 }
+
+await signIn();
 
 console.log(`bench: ${BASE_URL} (median of ${RUNS} runs, after 1 warm-up)\n`);
 

@@ -1,5 +1,6 @@
 export const ERROR_CODES = [
   "validation_error",
+  "unauthorized",
   "not_found",
   "conflict",
   "internal_error",
@@ -11,6 +12,7 @@ export type ErrorCode = (typeof ERROR_CODES)[number];
 
 const CODE_TO_STATUS: Record<ErrorCode, number> = {
   validation_error: 400,
+  unauthorized: 401,
   not_found: 404,
   conflict: 409,
   internal_error: 500,

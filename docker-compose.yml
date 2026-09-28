@@ -43,6 +43,8 @@ services:
       PIPELINE_AUTORUN: "1"
       PIPELINE_TICK_SECONDS: "30"
       LOG_LEVEL: info
+      AUTH_ENABLED: "1"
+      SESSION_SECRET: dev-only-session-secret-change-me-32chars
     ports:
       - "3000:3000"
     healthcheck:

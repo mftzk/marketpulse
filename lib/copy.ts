@@ -21,6 +21,19 @@ export const COPY = {
     about: "About",
   },
 
+  auth: {
+    title: "Sign in to MarketPulse",
+    subtitle: "Restricted to authorized users.",
+    email: "Email",
+    password: "Password",
+    signIn: "Sign in",
+    signOut: "Sign out",
+    errorInvalid: "Invalid email or password",
+    errorGeneric: "Sign in failed",
+    demoHint: "Demo access",
+    demoCredentials: "trader@marketpulse.dev / marketpulse-demo",
+  },
+
   common: {
     loading: "Loading",
     stale: "stale",

@@ -10,6 +10,13 @@ import type { HealthView } from "@/lib/view-types";
 
 import { SessionPill } from "./SessionPill";
 
+interface SessionUser {
+  id: string;
+  email: string;
+  display_name: string;
+  is_demo: boolean;
+}
+
 const LINKS: { href: string; label: string }[] = [
   { href: "/", label: COPY.nav.dashboard },
   { href: "/watchlists", label: COPY.nav.watchlists },
@@ -23,12 +30,45 @@ export function NavBar() {
   const pathname = usePathname();
   const [now, setNow] = useState<Date | null>(null);
   const [health, setHealth] = useState<HealthView | null>(null);
+  const [user, setUser] = useState<SessionUser | null>(null);
 
   useEffect(() => {
     setNow(new Date());
     const timer = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function loadSession() {
+      try {
+        const response = await fetch("/api/auth/session", { cache: "no-store" });
+        if (!response.ok) {
+          if (active) setUser(null);
+          return;
+        }
+        const json = (await response.json()) as { data?: SessionUser };
+        if (active) setUser(json.data ?? null);
+      } catch {
+        // Keep the last known session state.
+      }
+    }
+    void loadSession();
+    return () => {
+      active = false;
+    };
+  }, [pathname]);
+
+  async function signOut() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // The cookie may already be gone; continue to the login screen.
+    }
+    // Hard navigation: a client-side push would serve the authenticated pages straight from
+    // the router cache, so the dashboard would stay visible after signing out.
+    window.location.assign("/login");
+  }
 
   useEffect(() => {
     let active = true;
@@ -110,6 +150,23 @@ export function NavBar() {
             />
             {health?.status ?? "unknown"}
           </span>
+          {user ? (
+            <span className="flex items-center gap-2">
+              <span
+                className="hidden max-w-[180px] truncate font-mono text-[11px] text-muted sm:inline"
+                title={user.email}
+              >
+                {user.email}
+              </span>
+              <button
+                type="button"
+                onClick={() => void signOut()}
+                className="border border-hairline px-2 py-1 text-[10px] uppercase tracking-wide text-muted hover:border-accent hover:text-accent"
+              >
+                {COPY.auth.signOut}
+              </button>
+            </span>
+          ) : null}
         </div>
       </div>
     </header>

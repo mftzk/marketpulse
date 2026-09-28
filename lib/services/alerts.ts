@@ -5,7 +5,7 @@ import { getDb } from "@/lib/db/client";
 import { alertEvents, alertRules, users } from "@/lib/db/schema";
 import { toIso } from "@/lib/services/shared";
 
-const DEMO_EMAIL = "demo@marketpulse.dev";
+const DEMO_EMAIL = "trader@marketpulse.dev";
 
 async function getDemoUserId(): Promise<string> {
   const db = getDb();

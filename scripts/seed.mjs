@@ -1,5 +1,7 @@
 import postgres from "postgres";
 
+import { hashPassword } from "../lib/auth/password.mjs";
+
 import {
   BENCHMARK_TICKERS,
   COMPANIES,
@@ -8,7 +10,10 @@ import {
   buildDataset,
 } from "./demo-data.mjs";
 
-const DEMO_EMAIL = "demo@marketpulse.dev";
+const DEMO_EMAIL = "trader@marketpulse.dev";
+const LEGACY_DEMO_EMAIL = "demo@marketpulse.dev";
+const DEMO_DISPLAY_NAME = "Demo Trader";
+const DEMO_PASSWORD = "marketpulse-demo";
 const DEMO_TICKERS = COMPANIES.map((c) => c.ticker);
 const DEMO_SECTOR_SLUGS = SECTORS.map((s) => s.slug);
 const DEMO_SOURCE_SLUGS = NEWS_SOURCES.map((s) => s.slug);
@@ -63,8 +68,8 @@ async function insert(sql, table, rows, pairs, jsonbCols = []) {
 async function deleteDemoData(sql) {
   // Watchlists and alert rules cascade from the demo user; events cascade their
   // child rows. Delete in dependency-safe order.
-  await sql`DELETE FROM alert_rules WHERE user_id IN (SELECT id FROM users WHERE email = ${DEMO_EMAIL})`;
-  await sql`DELETE FROM watchlists WHERE user_id IN (SELECT id FROM users WHERE email = ${DEMO_EMAIL})`;
+  await sql`DELETE FROM alert_rules WHERE user_id IN (SELECT id FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL}))`;
+  await sql`DELETE FROM watchlists WHERE user_id IN (SELECT id FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL}))`;
   await sql`DELETE FROM market_events WHERE ticker = ANY(${DEMO_TICKERS})`;
   await sql`DELETE FROM earnings_result WHERE ticker = ANY(${DEMO_TICKERS})`;
   await sql`DELETE FROM fundamental_expectations WHERE ticker = ANY(${DEMO_TICKERS})`;
@@ -76,7 +81,32 @@ async function deleteDemoData(sql) {
   await sql`DELETE FROM companies WHERE ticker = ANY(${DEMO_TICKERS})`;
   await sql`DELETE FROM sectors WHERE slug = ANY(${DEMO_SECTOR_SLUGS})`;
   await sql`DELETE FROM news_sources WHERE slug = ANY(${DEMO_SOURCE_SLUGS})`;
-  await sql`DELETE FROM users WHERE email = ${DEMO_EMAIL}`;
+  await sql`DELETE FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL})`;
+}
+
+/**
+ * Updates (or migrates) the single demo account's credential without touching
+ * any of its watchlists/alerts. Also renames a legacy `demo@marketpulse.dev`
+ * row in place so existing deployments keep their data.
+ */
+async function upsertDemoCredentials(sql) {
+  await sql`
+    UPDATE users SET email = ${DEMO_EMAIL}, updated_at = now()
+    WHERE email = ${LEGACY_DEMO_EMAIL}
+      AND NOT EXISTS (SELECT 1 FROM users WHERE email = ${DEMO_EMAIL})
+  `;
+  await sql`
+    UPDATE users
+    SET password_hash = ${hashPassword(DEMO_PASSWORD)},
+        display_name = ${DEMO_DISPLAY_NAME},
+        is_demo = true,
+        updated_at = now()
+    WHERE email = ${DEMO_EMAIL}
+  `;
+}
+
+function printDemoCredentials() {
+  console.log(`seed: demo login — ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
 }
 
 async function run() {
@@ -84,26 +114,39 @@ async function run() {
   const sql = postgres(url, { max: 1 });
 
   try {
-    const existing = await sql`SELECT id FROM users WHERE email = ${DEMO_EMAIL}`;
+    const existing = await sql`SELECT id FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL})`;
     if (existing.length > 0 && !isForce()) {
+      await sql.begin(async (tx) => {
+        await upsertDemoCredentials(tx);
+      });
       console.log("Demo data already present.");
+      printDemoCredentials();
       return;
     }
 
     const dataset = buildDataset({ now: new Date() });
+    const passwordHash = hashPassword(DEMO_PASSWORD);
+    const demoUsers = dataset.users.map((user) => ({
+      ...user,
+      displayName: DEMO_DISPLAY_NAME,
+      passwordHash,
+      lastLoginAt: null,
+    }));
 
     await sql.begin(async (tx) => {
       if (isForce()) {
         await deleteDemoData(tx);
       }
 
-      await insert(tx, "users", dataset.users, [
+      await insert(tx, "users", demoUsers, [
         ["id", "id"],
         ["email", "email"],
         ["display_name", "displayName"],
         ["is_demo", "isDemo"],
         ["risk_profile", "riskProfile"],
         ["prefs", "prefs"],
+        ["password_hash", "passwordHash"],
+        ["last_login_at", "lastLoginAt"],
       ], ["prefs"]);
 
       await insert(tx, "sectors", dataset.sectors, [
@@ -348,6 +391,7 @@ async function run() {
     for (const [key, value] of Object.entries(counts)) {
       console.log(`  ${key}: ${value}`);
     }
+    printDemoCredentials();
   } finally {
     await sql.end();
   }

@@ -88,6 +88,12 @@ export interface Config {
   logLevel: LogLevel;
   appUrl: string | null;
   isProduction: boolean;
+  /** Whether the auth gate is enforced. Defaults to `true` when unset. */
+  authEnabled: boolean;
+  /** HMAC key for `mp_session`; required (>=32 chars) when auth is enabled. */
+  sessionSecret: string | null;
+  /** Human-readable reason auth is misconfigured, or `null` when valid. */
+  authConfigError: string | null;
   alertWebhookUrl: string | null;
   alertTelegramBotToken: string | null;
   alertTelegramChatId: string | null;
@@ -107,6 +113,17 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   const logLevel = parseLogLevel(nonEmpty(env.LOG_LEVEL));
   const pipelineTickSeconds = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_SECONDS), 30);
 
+  // Auth is enabled unless explicitly disabled. A missing/short secret never
+  // throws at import time (that would break `next build`, which has no runtime
+  // env); instead `authConfigError` is surfaced and the session helpers throw a
+  // clear error when a token is actually signed or verified.
+  const authEnabled = parseBoolean(nonEmpty(env.AUTH_ENABLED), true);
+  const sessionSecret = nonEmpty(env.SESSION_SECRET);
+  const authConfigError =
+    authEnabled && (sessionSecret === null || sessionSecret.length < 32)
+      ? "SESSION_SECRET must be set to at least 32 characters while AUTH_ENABLED is on"
+      : null;
+
   return {
     databaseUrl,
     databaseConfigured: databaseUrl !== null,
@@ -125,6 +142,9 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     logLevel,
     appUrl,
     isProduction: nonEmpty(env.NODE_ENV) === "production",
+    authEnabled,
+    sessionSecret,
+    authConfigError,
     alertWebhookUrl: nonEmpty(env.ALERT_WEBHOOK_URL),
     alertTelegramBotToken: nonEmpty(env.ALERT_TELEGRAM_BOT_TOKEN),
     alertTelegramChatId: nonEmpty(env.ALERT_TELEGRAM_CHAT_ID),

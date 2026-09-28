@@ -44,9 +44,11 @@ lib/
   market/            reaction windows, RVOL, relative strength, technicals, macro
   scoring/           deterministic impact score + interpretation language
   alerts/            rule evaluation + channel registry
+  auth/              password hashing, signed sessions, route policy
   cache/             Redis-if-available store with memory fallback
   pipeline/          orchestrator (job steps), scheduler, job registry
   services/          business query layer used by API + server components
+middleware.ts        auth gate (Node runtime; no DB access)
 drizzle/             NNNN_*.sql migrations
 scripts/             migrate.mjs seed.mjs release.mjs demo-data.mjs smoke.mjs
 tests/               vitest unit suites
@@ -65,6 +67,8 @@ npm ci
 npm run db:release                # run migrations, then seed demo data
 npm run dev                       # http://localhost:3000
 ```
+
+Sign in with the seeded demo account: **`trader@marketpulse.dev` / `marketpulse-demo`**.
 
 Useful scripts:
 
@@ -91,9 +95,12 @@ server. `docker compose config -q` validates the compose file.
 
 ```bash
 BASE_URL=http://127.0.0.1:3000 npm run smoke
+# optional overrides: SMOKE_EMAIL / SMOKE_PASSWORD
 ```
 
-Prints a `PASS/FAIL` table, scans every event string for advice language, checks all 16 event-detail
+The harness signs in first (defaults to the demo account), then runs its checks with the session
+cookie. Prints a `PASS/FAIL` table, verifies unauthenticated API calls get `401` while
+`/api/health` stays public, scans every event string for advice language, checks all 16 event-detail
 sections, and exits non-zero on any failure.
 
 ---
@@ -114,6 +121,47 @@ Out of the box the app uses mock providers (`NEWS_PROVIDER=mock`, `MARKET_PROVID
 The mock providers are selected through `lib/providers/index.ts`, a registry. Pointing at a real
 vendor means implementing the same `NewsProvider` / `MarketDataProvider` / `FundamentalDataProvider`
 interfaces and registering them there — no caller changes.
+
+---
+
+## Authentication
+
+Every page and API route requires a signed-in session by default. The public
+exceptions are `/login`, `POST /api/auth/login` and `GET /api/health` (so the
+uptime monitor keeps working). `middleware.ts` gates requests: API routes get a
+JSON `401 unauthorized`, pages are redirected to `/login?next=<path>`.
+
+- **Credentials** — `users.password_hash` stores a scrypt hash
+  (`lib/auth/password.mjs`: N=16384, r=8, p=1, 64-byte key, random 16-byte salt).
+  Plaintext is never stored, logged or returned.
+- **Sessions** — stateless signed cookie `mp_session`:
+  `base64url(JSON {uid,email,iat,exp}) + "." + HMAC-SHA256(body, SESSION_SECRET)`,
+  verified with a constant-time comparison. Cookie is `httpOnly`, `sameSite=lax`,
+  and `secure` when `APP_URL` starts with `https://`.
+- **Rate limiting** — login is limited to 10 attempts / 5 min per IP+email via
+  the cache store (memory fallback when Redis is absent).
+
+| Variable | Meaning |
+|---|---|
+| `AUTH_ENABLED` | `1` (default) enforces the gate; `0` disables it (local-dev escape hatch) |
+| `SESSION_SECRET` | HMAC signing key — **required and >= 32 chars** when auth is on |
+
+Generate a secret:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+**Adding a user.** There is intentionally no signup endpoint. Hash a password
+with the same module and insert the row:
+
+```bash
+node -e "import('./lib/auth/password.mjs').then((m) => console.log(m.hashPassword('your-password')))"
+```
+
+```sql
+INSERT INTO users (email, display_name, password_hash) VALUES ('you@example.com', 'You', '<hash>');
+```
 
 ---
 
@@ -169,7 +217,10 @@ mutate.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/health` | never 500s; unreachable DB → `degraded` |
+| POST | `/api/auth/login` | `{ email, password }` → user + `mp_session` cookie; 401 on bad creds, 429 when rate-limited |
+| POST | `/api/auth/logout` | clears the cookie |
+| GET | `/api/auth/session` | current user, or 401 |
+| GET | `/api/health` | public; never 500s; unreachable DB → `degraded` |
 | GET | `/api/events` | filters: `ticker`, `sector`, `event_type`, `min_impact`, `max_impact`, `source`, `max_age_minutes`, `session`, `catalyst_direction`, `q`, `sort` |
 | GET | `/api/events/{id}` | `{ data: { event, detail } }`, 404 `not_found` |
 | GET | `/api/stocks/{ticker}` | quote, technical, expectations, earnings, latest events, related |
@@ -190,7 +241,8 @@ mutate.
 | GET | `/api/search` | `?q=` ticker + event quick search |
 
 Error envelope: `{ error, code, fields? }` with
-`code ∈ validation_error | not_found | conflict | internal_error | unavailable | rate_limit`.
+`code ∈ validation_error | unauthorized | not_found | conflict | internal_error | unavailable | rate_limit`.
+Every route except `/login`, `POST /api/auth/login` and `GET /api/health` requires a valid session.
 
 ---
 
@@ -227,6 +279,8 @@ helpers, and API DTO contracts. No network or database is touched.
    NEWS_MODE=live
    PIPELINE_AUTORUN=1
    PIPELINE_TICK_SECONDS=30
+   AUTH_ENABLED=1
+   SESSION_SECRET=<at least 32 random characters>
    # REDIS_URL optional
    ```
 4. Optional `REDIS_URL` for a shared cache. Again: the cache is never a source of truth, so the app

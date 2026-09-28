@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build && mkdir -p .next/standalone/scripts .next/standalone/node_modules && cp scripts/release.mjs scripts/migrate.mjs scripts/seed.mjs scripts/demo-data.mjs .next/standalone/scripts/ && rm -rf .next/standalone/drizzle && cp -R drizzle .next/standalone/drizzle && cp -R node_modules/postgres .next/standalone/node_modules/",
+    "build": "next build && mkdir -p .next/standalone/scripts .next/standalone/node_modules .next/standalone/lib/auth && cp scripts/release.mjs scripts/migrate.mjs scripts/seed.mjs scripts/demo-data.mjs .next/standalone/scripts/ && cp lib/auth/password.mjs .next/standalone/lib/auth/ && rm -rf .next/standalone/drizzle && cp -R drizzle .next/standalone/drizzle && cp -R node_modules/postgres .next/standalone/node_modules/",
     "start": "next start",
     "test": "vitest run",
     "test:watch": "vitest",

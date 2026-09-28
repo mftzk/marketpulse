@@ -8,7 +8,7 @@ import { latestPriceSnapshots, latestVolumeSnapshots } from "@/lib/db/queries/ma
 import { companies, users, watchlistStocks, watchlists } from "@/lib/db/schema";
 import { num } from "@/lib/services/shared";
 
-const DEMO_EMAIL = "demo@marketpulse.dev";
+const DEMO_EMAIL = "trader@marketpulse.dev";
 
 async function getDemoUserId(): Promise<string> {
   const db = getDb();

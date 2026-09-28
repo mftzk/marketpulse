@@ -13,10 +13,12 @@ const BASE_URL = (process.env.BASE_URL || process.argv[2] || "http://127.0.0.1:3
   /\/$/,
   "",
 );
+const SMOKE_EMAIL = process.env.SMOKE_EMAIL || "trader@marketpulse.dev";
+const SMOKE_PASSWORD = process.env.SMOKE_PASSWORD || "marketpulse-demo";
 
 const NO_ADVICE = /\b(buy|sell|recommend(ation)?s?|target price|take profit|enter at)\b/i;
 
-const state = { events: [] };
+const state = { events: [], sessionCookie: "" };
 
 function assert(condition, message) {
   if (!condition) {
@@ -24,8 +26,12 @@ function assert(condition, message) {
   }
 }
 
+function authHeaders(extra = {}) {
+  return state.sessionCookie ? { cookie: state.sessionCookie, ...extra } : { ...extra };
+}
+
 async function getJson(path) {
-  const response = await fetch(`${BASE_URL}${path}`);
+  const response = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`GET ${path} -> HTTP ${response.status}`);
   }
@@ -93,6 +99,35 @@ const DETAIL_SECTIONS = [
   "impact_breakdown",
   "intraday",
 ];
+
+await check("POST /api/auth/login (demo account)", async () => {
+  const response = await fetch(`${BASE_URL}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: SMOKE_EMAIL, password: SMOKE_PASSWORD }),
+  });
+  assert(response.ok, `HTTP ${response.status}`);
+  const setCookie = response.headers.get("set-cookie");
+  assert(setCookie, "session cookie was not set");
+  state.sessionCookie = setCookie.split(";")[0];
+  const body = await response.json();
+  assert(body.data && body.data.email, "user payload missing");
+  return `signed in as ${body.data.email}`;
+});
+
+await check("GET /api/events without a session -> 401", async () => {
+  const response = await fetch(`${BASE_URL}/api/events?limit=1`);
+  assert(response.status === 401, `HTTP ${response.status}`);
+  const body = await response.json();
+  assert(body.code === "unauthorized", `code ${body.code}`);
+  return "401 unauthorized";
+});
+
+await check("GET /api/health without a session -> 200", async () => {
+  const response = await fetch(`${BASE_URL}/api/health`);
+  assert(response.status === 200, `HTTP ${response.status}`);
+  return "200 ok";
+});
 
 await check("GET /api/health", async () => {
   const health = await getJson("/api/health");
@@ -201,7 +236,7 @@ await check("GET /api/pipeline/status", async () => {
 await check("POST /api/pipeline/run", async () => {
   const response = await fetch(`${BASE_URL}/api/pipeline/run`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: authHeaders({ "content-type": "application/json" }),
     body: JSON.stringify({ trigger: "api" }),
   });
   assert(response.ok, `HTTP ${response.status}`);
