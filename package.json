@@ -1,0 +1,41 @@
+{
+  "name": "marketpulse",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build && mkdir -p .next/standalone/scripts .next/standalone/node_modules && cp scripts/release.mjs scripts/migrate.mjs scripts/seed.mjs scripts/demo-data.mjs .next/standalone/scripts/ && rm -rf .next/standalone/drizzle && cp -R drizzle .next/standalone/drizzle && cp -R node_modules/postgres .next/standalone/node_modules/",
+    "start": "next start",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:seed": "node scripts/seed.mjs",
+    "db:release": "node scripts/release.mjs",
+    "db:reset": "node scripts/migrate.mjs && node scripts/seed.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.2",
+    "lightweight-charts": "^5.0.9",
+    "next": "^16.3.0",
+    "postgres": "^3.4.7",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.67"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.11",
+    "@types/node": "^22.15.30",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "drizzle-kit": "^0.31.10",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  },
+  "overrides": {
+    "esbuild": "^0.25.0"
+  }
+}
