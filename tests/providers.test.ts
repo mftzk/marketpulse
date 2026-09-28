@@ -1,10 +1,27 @@
 import { describe, expect, it } from "vitest";
 
 import { MockFundamentalProvider } from "@/lib/providers/fundamental";
-import { MockMarketProvider } from "@/lib/providers/market";
+import { maxDailyChangePct, MockMarketProvider } from "@/lib/providers/market";
 import { MockNewsProvider } from "@/lib/providers/news";
 
 const FIXED_NOW = new Date("2026-01-05T18:00:00Z");
+
+const ALL_TICKERS = [
+  "NVDA",
+  "AMD",
+  "TSM",
+  "AVGO",
+  "META",
+  "MSFT",
+  "AAPL",
+  "TSLA",
+  "SPY",
+  "QQQ",
+  "SOXX",
+  "XLK",
+  "XLC",
+  "XLY",
+];
 
 describe("MockNewsProvider (backfill)", () => {
   it("is deterministic for the same now", async () => {
@@ -127,6 +144,59 @@ describe("MockMarketProvider", () => {
         expect(snapshot.rvol).not.toBeNull();
         expect(snapshot.rvol as number).toBeGreaterThanOrEqual(0.3);
         expect(snapshot.rvol as number).toBeLessThanOrEqual(3);
+      }
+    }
+  });
+});
+
+describe("MockMarketProvider daily bounds (Defect B)", () => {
+  it("keeps daily close-to-close changes within the per-class band over 30 sessions", async () => {
+    const at = new Date("2026-01-05T16:00:00Z");
+    for (const ticker of ALL_TICKERS) {
+      const bars = await new MockMarketProvider().dailyBars(ticker, 30, at);
+      expect(bars).toHaveLength(30);
+      const max = maxDailyChangePct(ticker);
+      for (let i = 1; i < bars.length; i += 1) {
+        const change = (bars[i].close - bars[i - 1].close) / bars[i - 1].close;
+        expect(Math.abs(change)).toBeLessThanOrEqual(max + 1e-9);
+      }
+    }
+  });
+
+  it("keeps daily bars internally consistent (gap ≤ 2%, low ≤ open/close ≤ high)", async () => {
+    const at = new Date("2026-01-05T16:00:00Z");
+    for (const ticker of ALL_TICKERS) {
+      const bars = await new MockMarketProvider().dailyBars(ticker, 30, at);
+      for (let i = 1; i < bars.length; i += 1) {
+        const bar = bars[i];
+        const gap = (bar.open - bars[i - 1].close) / bars[i - 1].close;
+        expect(Math.abs(gap)).toBeLessThanOrEqual(0.02 + 1e-9);
+        expect(bar.high).toBeGreaterThanOrEqual(bar.low);
+        expect(bar.open).toBeGreaterThanOrEqual(bar.low);
+        expect(bar.open).toBeLessThanOrEqual(bar.high);
+        expect(bar.close).toBeGreaterThanOrEqual(bar.low);
+        expect(bar.close).toBeLessThanOrEqual(bar.high);
+      }
+    }
+  });
+
+  it("keeps the live quote inside the generated daily range and daily change in band", async () => {
+    const at = new Date("2026-01-05T18:00:00Z");
+    const provider = new MockMarketProvider();
+    for (const ticker of ALL_TICKERS) {
+      const stats = await provider.dailyStats(ticker, at);
+      const quote = await provider.quote(ticker, at);
+      expect(stats).not.toBeNull();
+      expect(quote).not.toBeNull();
+      if (!stats || !quote) {
+        continue;
+      }
+      expect(quote.price).toBeGreaterThanOrEqual(stats.dayLow);
+      expect(quote.price).toBeLessThanOrEqual(stats.dayHigh);
+      // changePctDaily is rounded to 2 decimals in percent units.
+      expect(Math.abs(quote.changePctDaily)).toBeLessThanOrEqual(maxDailyChangePct(ticker) * 100 + 0.01);
+      if (quote.gapPct !== null) {
+        expect(Math.abs(quote.gapPct)).toBeLessThanOrEqual(2 + 0.01);
       }
     }
   });

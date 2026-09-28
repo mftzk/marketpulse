@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { computeReaction, type ReactionSnapshot } from "@/lib/market/reaction";
+import { MockMarketProvider } from "@/lib/providers/market";
 
 function snap(ts: string, price: number): ReactionSnapshot {
   return { ts: new Date(ts), price };
@@ -74,5 +75,71 @@ describe("computeReaction", () => {
     ];
     const result = computeReaction(PUB, snapshots);
     expect(result.atPublication.price).toBe(99);
+  });
+});
+
+describe("computeReaction over the generated minute series (Defect A)", () => {
+  it("produces distinct consecutive minute prices", async () => {
+    const provider = new MockMarketProvider();
+    const now = new Date("2026-01-05T18:00:00Z");
+    const bars = await provider.bars("NVDA", {
+      from: new Date(now.getTime() - 30 * 60_000),
+      to: now,
+      intervalMinutes: 1,
+    });
+    expect(bars.length).toBeGreaterThan(20);
+    let differences = 0;
+    for (let i = 1; i < bars.length; i += 1) {
+      if (bars[i].close !== bars[i - 1].close) {
+        differences += 1;
+      }
+    }
+    expect(differences).toBeGreaterThan(0);
+  });
+
+  it("yields non-null, non-zero 1m/5m/15m reactions after publication", async () => {
+    const provider = new MockMarketProvider();
+    const now = new Date("2026-01-05T18:00:00Z");
+    const bars = await provider.bars("NVDA", {
+      from: new Date(now.getTime() - 30 * 60_000),
+      to: now,
+      intervalMinutes: 1,
+    });
+    const snapshots: ReactionSnapshot[] = bars.map((b) => ({
+      ts: new Date(b.time * 1000),
+      price: b.close,
+    }));
+    const publishedAt = snapshots[5].ts;
+    const result = computeReaction(publishedAt, snapshots);
+
+    expect(result.reaction1m).not.toBeNull();
+    expect(result.reaction5m).not.toBeNull();
+    expect(result.reaction15m).not.toBeNull();
+    expect(result.reaction1m).not.toBe(0);
+    expect(result.reaction5m).not.toBe(0);
+    expect(result.reaction15m).not.toBe(0);
+    expect(result.peak60m).not.toBeNull();
+    expect(result.trough60m).not.toBeNull();
+  });
+
+  it("keeps peak/trough null when no snapshot falls strictly after publication", async () => {
+    const provider = new MockMarketProvider();
+    const now = new Date("2026-01-05T18:00:00Z");
+    const bars = await provider.bars("NVDA", {
+      from: new Date(now.getTime() - 10 * 60_000),
+      to: now,
+      intervalMinutes: 1,
+    });
+    const snapshots: ReactionSnapshot[] = bars.map((b) => ({
+      ts: new Date(b.time * 1000),
+      price: b.close,
+    }));
+    const last = snapshots[snapshots.length - 1];
+    const publishedAt = new Date(last.ts.getTime() + 60_000);
+    const result = computeReaction(publishedAt, snapshots);
+    expect(result.peak60m).toBeNull();
+    expect(result.trough60m).toBeNull();
+    expect(result.peak60m).not.toBe(0);
+    expect(result.trough60m).not.toBe(0);
   });
 });

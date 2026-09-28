@@ -49,10 +49,67 @@ const SECTOR_ETF_BY_TICKER: Record<string, string> = {
   TSLA: "XLY",
 };
 
+const SECTOR_ETFS = new Set(["SOXX", "XLK", "XLC", "XLY"]);
+
+/**
+ * Daily close-to-close change limits by instrument class (Defect B). The
+ * generated daily series is bounded by these so benchmark/ETF prints cannot
+ * produce the unrealistic multi-percent moves a driftless walk otherwise can.
+ */
+const INDEX_MAX_DAILY_CHANGE = 0.015; // SPY
+const NASDAQ_MAX_DAILY_CHANGE = 0.018; // QQQ
+const SECTOR_ETF_MAX_DAILY_CHANGE = 0.025; // SOXX / XLK / XLC / XLY
+const SINGLE_NAME_MAX_DAILY_CHANGE = 0.06; // NVDA … TSLA
+const MAX_GAP_PCT = 0.02;
+
+/** Largest allowed |close-to-close daily change| for a ticker. */
+export function maxDailyChangePct(ticker: string): number {
+  if (ticker === "SPY") {
+    return INDEX_MAX_DAILY_CHANGE;
+  }
+  if (ticker === "QQQ") {
+    return NASDAQ_MAX_DAILY_CHANGE;
+  }
+  if (SECTOR_ETFS.has(ticker)) {
+    return SECTOR_ETF_MAX_DAILY_CHANGE;
+  }
+  return SINGLE_NAME_MAX_DAILY_CHANGE;
+}
+
+/**
+ * Per-minute shock coefficients `[market, sector, idio]` as a fraction of price.
+ * The combined standard deviation lands in the required 0.05%–0.12% band.
+ */
+function intradayShockFractions(ticker: string): [number, number, number] {
+  if (ticker === "SPY" || ticker === "QQQ") {
+    return [0.0005, 0.00035, 0.0008];
+  }
+  if (SECTOR_ETFS.has(ticker)) {
+    return [0.00055, 0.0004, 0.0009];
+  }
+  return [0.00075, 0.0005, 0.00165];
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Fixed epoch (UTC) for the deterministic daily series. */
 const DAILY_EPOCH = Date.UTC(2020, 0, 1);
 const REGULAR_OPEN_MINUTES = 9 * 60 + 30;
+const REGULAR_SESSION_MINUTES = 390;
+
+interface DailyBar {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+interface IntradayPath {
+  open: number;
+  low: number;
+  high: number;
+  prices: number[];
+}
 
 interface Catalyst {
   direction: number; // +1 / -1 / 0
@@ -134,6 +191,7 @@ function minutesSinceRegularOpen(at: Date): number {
 export class MockMarketProvider implements MarketDataProvider {
   private readonly catalysts = new Map<string, Catalyst[]>();
   private readonly closeCache = new Map<string, { index: number; closes: number[] }>();
+  private readonly pathCache = new Map<string, IntradayPath>();
 
   anchorPrice(ticker: string): number | null {
     const value = ANCHOR_PRICES[ticker];
@@ -343,13 +401,16 @@ export class MockMarketProvider implements MarketDataProvider {
       return cached.closes;
     }
     const anchor = this.anchorPrice(ticker) ?? 100;
+    const maxChange = maxDailyChangePct(ticker);
     const rng = mulberry32(hashString(`${ticker}:daily`));
     const closes: number[] = new Array(maxIndex + 1);
     let price = anchor;
-    for (let i = 0; i <= maxIndex; i += 1) {
-      const shock = (rng() - 0.5) * anchor * 0.02;
-      const reversion = (anchor - price) * 0.05;
-      price = Math.max(0.01, price + reversion + shock);
+    closes[0] = price;
+    for (let i = 1; i <= maxIndex; i += 1) {
+      const shock = (rng() - 0.5) * 2 * maxChange * 0.7;
+      const reversion = ((anchor - price) / anchor) * maxChange * 0.3;
+      const ret = Math.max(-maxChange, Math.min(maxChange, shock + reversion));
+      price = Math.max(0.01, price * (1 + ret));
       closes[i] = price;
     }
     this.closeCache.set(ticker, { index: maxIndex, closes });
@@ -361,16 +422,85 @@ export class MockMarketProvider implements MarketDataProvider {
     index: number,
     closes: number[],
     adv: number,
-  ): { open: number; high: number; low: number; close: number; volume: number } {
+  ): DailyBar {
     const anchor = this.anchorPrice(ticker) ?? 100;
     const close = closes[Math.max(0, Math.min(index, closes.length - 1))] ?? anchor;
     const prevClose = index > 0 ? closes[index - 1] : anchor;
+    const maxChange = maxDailyChangePct(ticker);
     const rng = mulberry32(hashString(`${ticker}:dbar:${index}`));
-    const open = prevClose * (1 + (rng() - 0.5) * 0.01);
-    const high = Math.max(open, close) * (1 + rng() * 0.008);
-    const low = Math.min(open, close) * (1 - rng() * 0.008);
+    const gapMax = Math.min(MAX_GAP_PCT, maxChange);
+    const open = prevClose * (1 + (rng() - 0.5) * 2 * gapMax);
+    const wick = rng() * 0.01;
+    const upper = prevClose * (1 + maxChange);
+    const lower = prevClose * (1 - maxChange);
+    let high = Math.min(Math.max(open, close) * (1 + wick), upper);
+    let low = Math.max(Math.min(open, close) * (1 - wick), lower);
+    high = Math.max(high, open, close);
+    low = Math.min(low, open, close);
     const volume = Math.floor(adv * (0.6 + rng() * 0.9));
     return { open, high, low, close, volume };
+  }
+
+  /** The generated daily bar for the trading day containing `ts`. */
+  private dailyBarFor(ticker: string, ts: Date): DailyBar {
+    const dates = lastTradingDates(ts, 1);
+    const day = dates[dates.length - 1];
+    const index = tradingDayIndex(day);
+    const closes = this.dailyCloses(ticker, index);
+    return this.dailyBarForIndex(ticker, index, closes, this.avgDailyVolume(ticker));
+  }
+
+  private clamp(value: number, low: number, high: number): number {
+    return Math.max(low, Math.min(high, value));
+  }
+
+  /**
+   * Mean-reverting per-minute intraday path anchored to the generated daily
+   * open. The path is bounded by the DAY's regulatory-style limit
+   * (`prevClose ± maxDailyChangePct`), NOT by the daily bar's own high/low: the
+   * generated daily range is only ~1 % wide, so clamping to it pinned whole
+   * stretches of the session to the same tick (observed live: AMD stuck at
+   * 171.47 for 12+ consecutive minutes), which made every reaction window
+   * resolve to an identical price. `dailyStatsSync` already reports
+   * `dayHigh/dayLow` as `max/min(dailyBar.high/low, livePrice)`, so the daily
+   * range stays consistent with this path.
+   *
+   * Cached per ticker/day; `prices[i]` is the price `i` minutes after the open.
+   */
+  private intradayPath(ticker: string, ts: Date): IntradayPath {
+    const day = dayKey(ts);
+    const key = `${ticker}:${day}`;
+    const cached = this.pathCache.get(key);
+    if (cached) {
+      return cached;
+    }
+
+    const bar = this.dailyBarFor(ticker, ts);
+    const [marketFraction, sectorFraction, idioFraction] = intradayShockFractions(ticker);
+    const rngMarket = mulberry32(hashString(`market:${day}`));
+    const rngSector = mulberry32(hashString(`sector:${SECTOR_ETF_BY_TICKER[ticker] ?? "SPY"}:${day}`));
+    const rngIdio = mulberry32(hashString(`${ticker}:${day}`));
+
+    const band = maxDailyChangePct(ticker);
+    const upper = bar.open * (1 + band);
+    const lower = bar.open * (1 - band);
+
+    const prices: number[] = new Array(REGULAR_SESSION_MINUTES + 1);
+    let price = bar.open;
+    prices[0] = this.clamp(price, lower, upper);
+    for (let i = 1; i <= REGULAR_SESSION_MINUTES; i += 1) {
+      const shock =
+        ((rngMarket() - 0.5) * 2 * marketFraction +
+          (rngSector() - 0.5) * 2 * sectorFraction +
+          (rngIdio() - 0.5) * 2 * idioFraction) *
+        bar.open;
+      price += (bar.open - price) * 0.05 + shock;
+      prices[i] = this.clamp(price, lower, upper);
+    }
+
+    const path: IntradayPath = { open: bar.open, low: lower, high: upper, prices };
+    this.pathCache.set(key, path);
+    return path;
   }
 
   private catalystVolumeBoost(ticker: string, ts: Date): number {
@@ -399,22 +529,12 @@ export class MockMarketProvider implements MarketDataProvider {
     if (anchor === null) {
       return 0;
     }
-    const key = dayKey(ts);
-    const minute = ts.getUTCHours() * 60 + ts.getUTCMinutes();
-    const tickerRng = mulberry32(hashString(`${ticker}:${key}`));
-    const marketRng = mulberry32(hashString(`market:${key}`));
-    const sectorRng = mulberry32(hashString(`sector:${SECTOR_ETF_BY_TICKER[ticker] ?? "SPY"}:${key}`));
-
-    let marketDrift = 0;
-    let sectorDrift = 0;
-    let idioDrift = 0;
-    for (let i = 0; i < minute; i += 1) {
-      marketDrift += (marketRng() - 0.5) * anchor * 0.0008;
-      sectorDrift += (sectorRng() - 0.5) * anchor * 0.0005;
-      idioDrift += (tickerRng() - 0.5) * anchor * 0.0012;
-    }
-
-    return Math.max(0.01, anchor + marketDrift + sectorDrift + idioDrift);
+    const path = this.intradayPath(ticker, ts);
+    const elapsed = Math.max(
+      0,
+      Math.min(REGULAR_SESSION_MINUTES, Math.round(minutesSinceRegularOpen(ts))),
+    );
+    return path.prices[elapsed] ?? path.open;
   }
 
   private catalystMultiplier(ticker: string, ts: Date): number {

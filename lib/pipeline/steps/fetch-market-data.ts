@@ -1,8 +1,11 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 
+import { etWallClock, sessionFor } from "@/lib/core/session";
 import { computeConditions, computeTechnicals } from "@/lib/market/technical";
+import { volumeProfileFraction } from "@/lib/market/rvol";
 import { BROAD_BENCHMARKS, SECTOR_ETF_BY_SLUG } from "@/lib/market/relative-strength";
 import { macroSnapshots, priceSnapshots, sectors, stocks, technicalSnapshots, volumeSnapshots } from "@/lib/db/schema";
+import type { Bar, DailyStats } from "@/lib/providers/types";
 import type { PipelineContext } from "@/lib/pipeline/context";
 import type { JobResult } from "@/lib/pipeline/registry";
 
@@ -16,6 +19,8 @@ import type { JobResult } from "@/lib/pipeline/registry";
  * derived from the intraday bars. Volume is expected-volume based, so RVOL is
  * realistic and shared by every reader (`volume_snapshots.expected_volume_to_date`).
  */
+
+const REGULAR_OPEN_MINUTES = 9 * 60 + 30;
 
 interface MacroSeriesConfig {
   series: "VIX" | "US10Y" | "DXY" | "SP500" | "NASDAQ" | "SOXX" | "XLK" | "XLC" | "XLY";
@@ -61,7 +66,9 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
       ]),
     ];
 
-    const intradayFrom = new Date(ctx.now.getTime() - 6 * 60 * 60_000);
+    // One price/volume row per minute from the session open (or the last 6 h,
+    // whichever is shorter) up to now, using the provider's minute series.
+    const windowStart = snapshotWindowStart(ctx.now);
     let processed = 0;
 
     for (const ticker of tickers) {
@@ -70,62 +77,32 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
         continue;
       }
       const stats = await ctx.providers.market.dailyStats(ticker, ctx.now);
-      const intradayBars = await ctx.providers.market.bars(ticker, {
-        from: intradayFrom,
+      if (!stats) {
+        continue;
+      }
+      const minuteBars = await ctx.providers.market.bars(ticker, {
+        from: windowStart,
         to: ctx.now,
-        intervalMinutes: 5,
+        intervalMinutes: 1,
       });
-      const sessionVwap = computeTechnicals(intradayBars).vwap;
+      const sessionVwap = computeTechnicals(minuteBars).vwap;
       const dailyBars = await ctx.providers.market.dailyBars(ticker, 60, ctx.now);
       const dailyTechnicals = computeTechnicals(dailyBars);
 
-      const gapPct =
-        stats && stats.prevClose > 0
-          ? ((stats.open - stats.prevClose) / stats.prevClose) * 100
-          : null;
+      const gapPct = stats.prevClose > 0 ? ((stats.open - stats.prevClose) / stats.prevClose) * 100 : null;
       const distFrom52wHighPct =
-        stats && stats.high52w > 0
-          ? ((snapshot.price - stats.high52w) / stats.high52w) * 100
-          : null;
+        stats.high52w > 0 ? ((snapshot.price - stats.high52w) / stats.high52w) * 100 : null;
 
       const conditions = computeConditions({
         lastPrice: snapshot.price,
         vwap: sessionVwap,
-        prevDayHigh: stats?.prevDayHigh ?? null,
-        prevDayLow: stats?.prevDayLow ?? null,
+        prevDayHigh: stats.prevDayHigh,
+        prevDayLow: stats.prevDayLow,
         rvol: snapshot.rvol,
         gapPct,
       });
 
-      await ctx.db
-        .insert(priceSnapshots)
-        .values({
-          ticker,
-          ts: snapshot.ts,
-          price: String(snapshot.price),
-          session: snapshot.session,
-          changePctDaily: snapshot.changePctDaily === null ? null : String(snapshot.changePctDaily),
-          gapPct: gapPct === null ? null : String(gapPct),
-          vwap: sessionVwap === null ? null : String(sessionVwap),
-          high: stats ? String(stats.dayHigh) : null,
-          low: stats ? String(stats.dayLow) : null,
-          open: stats ? String(stats.open) : null,
-          prevClose: stats ? String(stats.prevClose) : null,
-        })
-        .onConflictDoNothing();
-
-      await ctx.db
-        .insert(volumeSnapshots)
-        .values({
-          ticker,
-          ts: snapshot.ts,
-          cumulativeVolume: snapshot.cumulativeVolume,
-          intervalVolume: snapshot.intervalVolume,
-          expectedVolumeToDate:
-            snapshot.expectedVolumeToDate === null ? null : String(snapshot.expectedVolumeToDate),
-          rvol: snapshot.rvol === null ? null : String(snapshot.rvol),
-        })
-        .onConflictDoNothing();
+      await persistMinuteSeries(ctx, ticker, minuteBars, stats, sessionVwap);
 
       await ctx.db
         .insert(technicalSnapshots)
@@ -138,10 +115,10 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
           ema9: dailyTechnicals.ema9 === null ? null : String(dailyTechnicals.ema9),
           atr14: dailyTechnicals.atr14 === null ? null : String(dailyTechnicals.atr14),
           rsi14: dailyTechnicals.rsi14 === null ? null : String(dailyTechnicals.rsi14),
-          prevDayHigh: stats ? String(stats.prevDayHigh) : null,
-          prevDayLow: stats ? String(stats.prevDayLow) : null,
-          dayHigh: stats ? String(stats.dayHigh) : null,
-          dayLow: stats ? String(stats.dayLow) : null,
+          prevDayHigh: String(stats.prevDayHigh),
+          prevDayLow: String(stats.prevDayLow),
+          dayHigh: String(stats.dayHigh),
+          dayLow: String(stats.dayLow),
           distFrom52wHighPct: distFrom52wHighPct === null ? null : String(distFrom52wHighPct),
           gapPct: gapPct === null ? null : String(gapPct),
           conditions,
@@ -168,6 +145,119 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * Start of the persisted snapshot window: the current session's regular open
+ * when the market has already opened, otherwise the last six hours — whichever
+ * is the shorter window.
+ */
+function snapshotWindowStart(now: Date): Date {
+  const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60_000);
+  const { weekday, minutes } = etWallClock(now);
+  if (weekday === 0 || weekday === 6 || minutes < REGULAR_OPEN_MINUTES) {
+    return sixHoursAgo;
+  }
+  const open = new Date(now.getTime() - (minutes - REGULAR_OPEN_MINUTES) * 60_000);
+  return open.getTime() > sixHoursAgo.getTime() ? open : sixHoursAgo;
+}
+
+/**
+ * Persists the provider's one-minute price and volume series (the same series
+ * the event chart renders), upserting by `(ticker, ts)` so a re-run is
+ * idempotent. Volume is expected-volume based, so stored RVOL stays realistic.
+ */
+async function persistMinuteSeries(
+  ctx: PipelineContext,
+  ticker: string,
+  bars: Bar[],
+  stats: DailyStats,
+  sessionVwap: number | null,
+): Promise<void> {
+  if (bars.length === 0) {
+    return;
+  }
+
+  const adv = stats.avgDailyVolume;
+  const day = ctx.now.toISOString().slice(0, 10);
+  const rvolFactor = 0.35 + (hash(`${ticker}:rvol:${day}`) % 245) / 100;
+  const gapPct = stats.prevClose > 0 ? ((stats.open - stats.prevClose) / stats.prevClose) * 100 : null;
+
+  const priceRows: (typeof priceSnapshots.$inferInsert)[] = [];
+  const volumeRows: (typeof volumeSnapshots.$inferInsert)[] = [];
+  let cumulativeRaw = 0;
+  let cumulativeVolume = 0;
+
+  for (const bar of bars) {
+    const ts = new Date(bar.time * 1000);
+    const price = bar.open;
+    const changePctDaily =
+      stats.prevClose > 0 ? ((price - stats.prevClose) / stats.prevClose) * 100 : null;
+    const expected = Math.max(1000, adv * Math.max(0.02, volumeProfileFraction(elapsedMinutes(ts))));
+    cumulativeRaw += bar.volume;
+    const nextCumulative = Math.round(cumulativeRaw * rvolFactor);
+    const intervalVolume = Math.max(1, nextCumulative - cumulativeVolume);
+    cumulativeVolume = nextCumulative;
+
+    priceRows.push({
+      ticker,
+      ts,
+      price: String(round(price, 4)),
+      session: sessionFor(ts),
+      changePctDaily: changePctDaily === null ? null : String(round(changePctDaily, 4)),
+      gapPct: gapPct === null ? null : String(round(gapPct, 4)),
+      vwap: sessionVwap === null ? null : String(round(sessionVwap, 4)),
+      high: String(round(Math.max(stats.dayHigh, price), 4)),
+      low: String(round(Math.min(stats.dayLow, price), 4)),
+      open: String(round(stats.open, 4)),
+      prevClose: String(round(stats.prevClose, 4)),
+    });
+    volumeRows.push({
+      ticker,
+      ts,
+      cumulativeVolume,
+      intervalVolume,
+      expectedVolumeToDate: String(round(expected, 4)),
+      rvol: String(round(cumulativeVolume / expected, 4)),
+    });
+  }
+
+  await ctx.db
+    .insert(priceSnapshots)
+    .values(priceRows)
+    .onConflictDoUpdate({
+      target: [priceSnapshots.ticker, priceSnapshots.ts],
+      set: {
+        price: sql`excluded.price`,
+        session: sql`excluded.session`,
+        changePctDaily: sql`excluded.change_pct_daily`,
+        gapPct: sql`excluded.gap_pct`,
+        vwap: sql`excluded.vwap`,
+        high: sql`excluded.high`,
+        low: sql`excluded.low`,
+        open: sql`excluded.open`,
+        prevClose: sql`excluded.prev_close`,
+        updatedAt: new Date(),
+      },
+    });
+
+  await ctx.db
+    .insert(volumeSnapshots)
+    .values(volumeRows)
+    .onConflictDoUpdate({
+      target: [volumeSnapshots.ticker, volumeSnapshots.ts],
+      set: {
+        cumulativeVolume: sql`excluded.cumulative_volume`,
+        intervalVolume: sql`excluded.interval_volume`,
+        expectedVolumeToDate: sql`excluded.expected_volume_to_date`,
+        rvol: sql`excluded.rvol`,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+function elapsedMinutes(ts: Date): number {
+  return Math.max(0, etWallClock(ts).minutes - REGULAR_OPEN_MINUTES);
 }
 
 /**
