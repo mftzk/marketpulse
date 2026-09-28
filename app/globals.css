@@ -1,17 +1,51 @@
 @import "tailwindcss";
 
+/*
+ * MarketPulse design tokens (Tailwind CSS v4 `@theme`).
+ * Dark institutional terminal: no light mode, no gradients, no shadows.
+ * Green/red are reserved for measured positive/negative movement only.
+ */
+@theme {
+  --color-page: #080b10;
+  --color-panel: #0e1420;
+  --color-panel-alt: #121a28;
+  --color-hairline: #1b2434;
+  --color-ink: #e6edf7;
+  --color-muted: #8fa1bb;
+  --color-accent: #ffb000;
+  --color-positive: #3ddc84;
+  --color-negative: #ff5c5c;
+  --color-neutral: #8fa1bb;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 :root {
   color-scheme: dark;
 }
 
 html,
 body {
-  background-color: #080b10;
-  color: #e6edf7;
+  background-color: var(--color-page);
+  color: var(--color-ink);
   min-height: 100%;
 }
 
 body {
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin, neutral scrollbars to match the terminal aesthetic. */
+* {
+  scrollbar-color: #1b2434 transparent;
+  scrollbar-width: thin;
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@utility hairline {
+  border: 1px solid var(--color-hairline);
 }
