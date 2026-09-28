@@ -61,6 +61,44 @@ function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 
+// Mirrors lib/market/rvol.ts (kept inline: this module must stay
+// dependency-free for the release-time seed).
+const VOLUME_PROFILE_ANCHORS = [
+  [0, 0],
+  [5, 0.03],
+  [15, 0.08],
+  [30, 0.13],
+  [60, 0.2],
+  [120, 0.32],
+  [180, 0.43],
+  [240, 0.53],
+  [300, 0.63],
+  [330, 0.7],
+  [360, 0.8],
+  [390, 0.95],
+  [9999, 1],
+];
+
+function volumeProfileFraction(elapsedMinutes) {
+  if (!Number.isFinite(elapsedMinutes) || elapsedMinutes <= 0) {
+    return 0;
+  }
+  const points = VOLUME_PROFILE_ANCHORS;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const [x0, y0] = points[i];
+    const [x1, y1] = points[i + 1];
+    if (elapsedMinutes <= x1) {
+      const t = (elapsedMinutes - x0) / (x1 - x0);
+      return y0 + t * (y1 - y0);
+    }
+  }
+  return 1;
+}
+
+function avgDailyVolume(ticker) {
+  return 6_000_000 + (hashString(`adv:${ticker}`) % 60_000_000);
+}
+
 // ---------------------------------------------------------------------------
 // Fixed reference data
 // ---------------------------------------------------------------------------
@@ -774,6 +812,20 @@ const PLAN = [
   ["AMD", "ANALYST_DOWNGRADE", 4],
 ];
 
+// Recent events injected into the last 3 hours of the default feed. The large
+// dayIndex values keep their `dedupe_key` distinct from the historical PLAN
+// while remaining valid for the fiscal-period derivation.
+const RECENT_PLAN = [
+  ["NVDA", "EARNINGS_BEAT", 8, 100],
+  ["AMD", "GUIDANCE_RAISE", 25, 101],
+  ["TSM", "ANALYST_UPGRADE", 47, 102],
+  ["AVGO", "ANALYST_DOWNGRADE", 70, 103],
+  ["META", "PRODUCT", 95, 104],
+  ["MSFT", "REGULATION", 130, 105],
+  ["AAPL", "CONTRACT", 160, 106],
+  ["TSLA", "EARNINGS_MISS", 160, 107],
+];
+
 // ---------------------------------------------------------------------------
 // Dataset builder
 // ---------------------------------------------------------------------------
@@ -847,20 +899,17 @@ export function buildDataset({ now }) {
   const fundamentalExpectations = [];
   const earningsResults = [];
 
-  for (const [ticker, scenarioKey, dayIndex] of PLAN) {
+  // Emits one canonical event (plus its article cluster, tickers, expectations
+  // and earnings). Shared by the historical PLAN and the recent-window plan.
+  const emitEvent = (ticker, scenarioKey, dayIndex, publishedAt) => {
     const company = companyByTicker.get(ticker);
     if (!company) {
-      continue;
+      return;
     }
     const scenario = SCENARIOS[scenarioKey](company, rng);
     const sectorSlug = COMPANIES.find((c) => c.ticker === ticker)?.sectorSlug;
     const benchmark = SECTOR_ETF_BY_SLUG[sectorSlug] ?? "SPY";
-    const day = days[dayIndex];
-
-    // event timestamp: within the day (13:00–20:00 UTC window)
-    const minutesOffset = 13 * 60 + randInt(rng, 0, 7 * 60);
-    const publishedAt = new Date(day.getTime() + minutesOffset * 60 * 1000);
-    const hourBucket = Math.floor(minutesOffset / 60);
+    const hourBucket = Math.floor(publishedAt.getUTCHours());
 
     const eventId = uuidFromRng(rng);
     const dedupeKey = `${ticker}:${scenario.eventType}:${dayIndex}:${hourBucket}`;
@@ -869,7 +918,6 @@ export function buildDataset({ now }) {
     const articleCount = randInt(rng, 1, 3);
     const session = scenario.eventType === "EARNINGS" ? "after_hours" : "regular";
 
-    const eventTickerIds = [];
     const peers = (PEER_GROUP_BY_SECTOR[sectorSlug] ?? []).filter((t) => t !== ticker);
     const affected = peers.slice(0, Math.min(peers.length, 2));
 
@@ -904,12 +952,11 @@ export function buildDataset({ now }) {
         similarity: a === 0 ? 1 : round(0.65 + rng() * 0.3, 2),
         isPrimary: a === 0,
       });
-      eventTickerIds.push(articleId);
     }
 
     const canonicalArticleId = newsArticles[newsArticles.length - articleCount].id;
 
-    // event_tickers: primary + affected
+    // event_tickers: primary + classifier-affected + sector peers
     const primaryChange = scenario.catalystDirection === "negative"
       ? -round(0.5 + rng() * 3, 2)
       : scenario.catalystDirection === "positive"
@@ -929,9 +976,9 @@ export function buildDataset({ now }) {
         id: uuidFromRng(rng),
         eventId,
         ticker: peer,
-        relation: "peer",
+        relation: "affected",
         changePctSincePublication: round(primaryChange * (0.3 + rng() * 0.5), 2),
-        isDirect: false,
+        isDirect: true,
       });
     }
 
@@ -1017,6 +1064,19 @@ export function buildDataset({ now }) {
         yoyRevenueGrowthPct: e.yoyRevenueGrowthPct ?? null,
       });
     }
+  };
+
+  for (const [ticker, scenarioKey, dayIndex] of PLAN) {
+    const day = days[dayIndex];
+    // event timestamp: within the day (13:00–20:00 UTC window)
+    const minutesOffset = 13 * 60 + randInt(rng, 0, 7 * 60);
+    emitEvent(ticker, scenarioKey, dayIndex, new Date(day.getTime() + minutesOffset * 60 * 1000));
+  }
+
+  // Fresh events inside the last 3 hours (so the default feed is not stale) and
+  // at least one event per demo ticker inside the last 24 hours.
+  for (const [ticker, scenarioKey, minutesAgo, dayIndex] of RECENT_PLAN) {
+    emitEvent(ticker, scenarioKey, dayIndex, new Date(nowDate.getTime() - minutesAgo * 60 * 1000));
   }
 
   // --- macro snapshots ---
@@ -1049,6 +1109,7 @@ export function buildDataset({ now }) {
   for (const ticker of allTickers) {
     const anchor = ANCHOR_PRICES[ticker] ?? 100;
     const seedForTicker = hashString(`bars:${ticker}`);
+    const adv = avgDailyVolume(ticker);
     let price = anchor * (1 + (rng() - 0.5) * 0.02);
 
     for (let d = 0; d < 5; d += 1) {
@@ -1058,6 +1119,7 @@ export function buildDataset({ now }) {
       const open = round(prevClose * (1 + (dayRng() - 0.5) * 0.01), 2);
       let cursor = open;
       let cumulative = 0;
+      let prevCumulative = 0;
       let dayHigh = open;
       let dayLow = open;
       const barTimes = [];
@@ -1072,8 +1134,15 @@ export function buildDataset({ now }) {
         const next = round(Math.max(0.01, cursor + marketMove + idioMove), 2);
         const high = round(Math.max(cursor, next) * (1 + dayRng() * 0.0008), 2);
         const low = round(Math.min(cursor, next) * (1 - dayRng() * 0.0008), 2);
-        const intervalVolume = Math.floor(400000 + dayRng() * 6000000);
-        cumulative += intervalVolume;
+        const elapsed = (b + 1) * 30;
+        const expectedVolumeToDate = Math.max(
+          1,
+          Math.floor(adv * volumeProfileFraction(elapsed)),
+        );
+        const rvolFactor = round(0.4 + dayRng() * 2.4, 2);
+        cumulative = Math.round(expectedVolumeToDate * rvolFactor);
+        const intervalVolume = Math.max(1, cumulative - prevCumulative);
+        prevCumulative = cumulative;
 
         barTimes.push(ts.toISOString());
         priceSnapshots.push({
@@ -1096,8 +1165,8 @@ export function buildDataset({ now }) {
           ts: ts.toISOString(),
           cumulativeVolume: cumulative,
           intervalVolume,
-          expectedVolumeToDate: Math.floor(3000000 * (b + 1) / barCount),
-          rvol: round(cumulative / Math.max(1, 3000000 * (b + 1) / barCount), 2),
+          expectedVolumeToDate,
+          rvol: round(cumulative / Math.max(1, expectedVolumeToDate), 2),
         });
         technicalSnapshots.push({
           id: uuidFromRng(rng),
@@ -1184,6 +1253,17 @@ export function buildDataset({ now }) {
     },
   ];
 
+  // Recent-window events can share a fiscal period with a historical event;
+  // keep a single row per unique key (later entries — the fresher events — win)
+  // so the seed's unique constraints hold.
+  const dedupeBy = (rows, keyFn) => {
+    const map = new Map();
+    for (const row of rows) {
+      map.set(keyFn(row), row);
+    }
+    return [...map.values()];
+  };
+
   return {
     users,
     sectors,
@@ -1194,8 +1274,11 @@ export function buildDataset({ now }) {
     marketEvents,
     eventArticles,
     eventTickers,
-    fundamentalExpectations,
-    earningsResults,
+    fundamentalExpectations: dedupeBy(
+      fundamentalExpectations,
+      (r) => `${r.ticker}|${r.fiscalPeriod}|${r.metric}`,
+    ),
+    earningsResults: dedupeBy(earningsResults, (r) => `${r.ticker}|${r.fiscalPeriod}`),
     macroSnapshots,
     priceSnapshots,
     volumeSnapshots,

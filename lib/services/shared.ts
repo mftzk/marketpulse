@@ -40,6 +40,25 @@ export function directionOrNeutral(value: CatalystDirection | null | undefined):
   return value ?? "neutral";
 }
 
+export interface PriceLike {
+  changePctDaily: string | number | null;
+}
+
+/**
+ * Single shared definition of the `market.sector_etf` block. Both the list and
+ * detail endpoints use it so the reported sector-ETF change can never diverge
+ * between the event card and the event detail.
+ */
+export function sectorEtfView(
+  symbol: string | null,
+  price: PriceLike | null | undefined,
+): { symbol: string; change_pct: number | null } | null {
+  if (!symbol) {
+    return null;
+  }
+  return { symbol, change_pct: num(price?.changePctDaily ?? null) };
+}
+
 export function newsAgeMinutes(publishedAt: Date | string | null, now: Date): number {
   if (!publishedAt) {
     return 0;

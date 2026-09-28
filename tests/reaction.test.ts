@@ -46,6 +46,18 @@ describe("computeReaction", () => {
     expect(result.trough60m).toBeCloseTo(-5);
   });
 
+  it("returns null peak/trough when no snapshot falls after publication in the window", () => {
+    const snapshots = [
+      snap("2026-01-05T14:50:00Z", 90),
+      snap("2026-01-05T15:00:00Z", 100), // anchored at publication
+    ];
+    const result = computeReaction(PUB, snapshots);
+    expect(result.peak60m).toBeNull();
+    expect(result.trough60m).toBeNull();
+    expect(result.peak60m).not.toBe(0);
+    expect(result.trough60m).not.toBe(0);
+  });
+
   it("uses the last snapshot as the daily reaction", () => {
     const snapshots = [
       snap("2026-01-05T15:00:00Z", 100),

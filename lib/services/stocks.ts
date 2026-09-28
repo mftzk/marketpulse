@@ -82,10 +82,10 @@ export async function getStock(ticker: string): Promise<StockDTO | null> {
       session: price?.session ?? null,
       gap_pct: num(price?.gapPct),
       rvol: num(volume?.rvol),
-      vwap: num(price?.vwap),
+      vwap: num(technical?.vwap) ?? num(price?.vwap),
       atr_pct: atrPct,
-      day_high: num(price?.high),
-      day_low: num(price?.low),
+      day_high: num(technical?.dayHigh) ?? num(price?.high),
+      day_low: num(technical?.dayLow) ?? num(price?.low),
       prev_close: num(price?.prevClose),
     },
     technical: technical

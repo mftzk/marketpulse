@@ -40,14 +40,6 @@ export interface ReactionResult {
   session: MarketSession | null;
 }
 
-const WINDOW_MS: Record<string, number> = {
-  reaction1m: 1 * 60_000,
-  reaction5m: 5 * 60_000,
-  reaction15m: 15 * 60_000,
-  reaction30m: 30 * 60_000,
-  reaction60m: 60 * 60_000,
-};
-
 function toNumber(value: number | null | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -136,13 +128,15 @@ export function computeReaction(
       result.reactionDaily = pctChange(pubPrice, toNumber(last.price) ?? pubPrice);
     }
 
-    // Peak/trough within the first 60 minutes after publication.
+    // Peak/trough within the first 60 minutes after publication. Requires at
+    // least one snapshot strictly after publication inside the window; with no
+    // such snapshot the values stay `null` (never 0), matching the other windows.
     const cutoff = pubMs + 60 * 60_000;
     let peak: number | null = null;
     let trough: number | null = null;
     for (const snap of sorted) {
       const t = snap.ts.getTime();
-      if (t < pubMs || t > cutoff) {
+      if (t <= pubMs || t > cutoff) {
         continue;
       }
       const r = pctChange(pubPrice, toNumber(snap.price) ?? pubPrice);

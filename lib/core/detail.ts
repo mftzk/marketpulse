@@ -1,5 +1,5 @@
 import type { CatalystDirection } from "@/lib/core/catalyst";
-import type { ImpactBand, ImpactComponentDTO, RelatedRelation } from "@/lib/core/dto";
+import type { ImpactComponentDTO, RelatedRelation } from "@/lib/core/dto";
 import type { EventType } from "@/lib/core/event-types";
 import type { MarketSession } from "@/lib/core/session";
 

@@ -96,6 +96,14 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
     macroPoints.map((m) => [m.series, { value: m.value, previous: m.previousValue, change: m.change, unit: m.unit, as_of: macroLatest.get(m.series)?.ts?.toISOString() ?? null }]),
   );
 
+  const vixRows = await db
+    .select()
+    .from(macroSnapshots)
+    .where(eq(macroSnapshots.series, "VIX" as never))
+    .orderBy(desc(macroSnapshots.ts))
+    .limit(20);
+  const vixMean = vixRows.length > 0 ? vixRows.reduce((acc, r) => acc + Number(r.value), 0) / vixRows.length : null;
+
   let breadthAdvancers = 0;
   let breadthDecliners = 0;
   for (const company of companyRows) {
@@ -120,7 +128,7 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
     ],
     sectors: sectorsData,
     macro,
-    regime: macroPoints.length > 0 ? deriveRegime(macroPoints) : null,
+    regime: macroPoints.length > 0 ? deriveRegime(macroPoints, { vixMean }) : null,
     breadth: { advancers: breadthAdvancers, decliners: breadthDecliners },
   };
 }

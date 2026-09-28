@@ -92,6 +92,44 @@ describe("MockMarketProvider", () => {
       await provider.bars("NOPE", { from: new Date(), to: new Date() }),
     ).toEqual([]);
   });
+
+  it("exposes 60 deterministic daily bars plus daily stats", async () => {
+    const at = new Date("2026-01-05T16:00:00Z");
+    const provider = new MockMarketProvider();
+    const bars = await provider.dailyBars("NVDA", 60, at);
+    expect(bars).toHaveLength(60);
+    for (const bar of bars) {
+      expect(bar.high).toBeGreaterThanOrEqual(bar.low);
+      expect(bar.volume).toBeGreaterThan(0);
+    }
+
+    const stats = await provider.dailyStats("NVDA", at);
+    expect(stats).not.toBeNull();
+    if (stats) {
+      expect(stats.prevDayHigh).toBeGreaterThanOrEqual(stats.prevDayLow);
+      expect(stats.dayHigh).toBeGreaterThanOrEqual(stats.dayLow);
+      expect(stats.high52w).toBeGreaterThan(stats.low52w);
+    }
+
+    // Stable across process restarts: a fresh provider yields identical bars.
+    const restarted = await new MockMarketProvider().dailyBars("NVDA", 60, at);
+    expect(restarted).toEqual(bars);
+  });
+
+  it("keeps intraday RVOL realistic (0.3–3.0)", async () => {
+    const provider = new MockMarketProvider();
+    const at = new Date("2026-01-05T16:00:00Z");
+    for (const ticker of ["NVDA", "AMD", "TSM", "AVGO", "META", "MSFT", "AAPL", "TSLA", "SPY", "QQQ", "SOXX"]) {
+      const snapshot = await provider.snapshot(ticker, at);
+      expect(snapshot).not.toBeNull();
+      if (snapshot) {
+        expect(snapshot.expectedVolumeToDate).toBeGreaterThan(0);
+        expect(snapshot.rvol).not.toBeNull();
+        expect(snapshot.rvol as number).toBeGreaterThanOrEqual(0.3);
+        expect(snapshot.rvol as number).toBeLessThanOrEqual(3);
+      }
+    }
+  });
 });
 
 describe("MockFundamentalProvider", () => {

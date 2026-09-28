@@ -11,6 +11,7 @@ interface DemoEvent {
   interpretation: string;
   eventType: string;
   ticker: string;
+  publishedAt: string;
 }
 
 interface DemoDataset {
@@ -39,13 +40,41 @@ describe("demo dataset", () => {
     expect(dataset.sectors.length).toBe(4);
   });
 
-  it("contains roughly 70 articles across at least 12 event types", () => {
+  it("contains a healthy article feed across at least 12 event types", () => {
     const dataset = buildDataset({ now: NOW });
     expect(dataset.newsArticles.length).toBeGreaterThanOrEqual(60);
-    expect(dataset.newsArticles.length).toBeLessThanOrEqual(80);
+    expect(dataset.newsArticles.length).toBeLessThanOrEqual(120);
 
     const eventTypes = new Set(dataset.marketEvents.map((e) => e.eventType));
     expect(eventTypes.size).toBeGreaterThanOrEqual(12);
+  });
+
+  it("includes fresh events in the last 3 hours and one per ticker in the last 24h", () => {
+    const dataset = buildDataset({ now: NOW });
+    const nowMs = NOW.getTime();
+    const ageMinutes = (e: DemoEvent) => (nowMs - new Date(e.publishedAt).getTime()) / 60_000;
+
+    const recent = dataset.marketEvents.filter((e) => ageMinutes(e) >= 0 && ageMinutes(e) <= 180);
+    expect(recent.length).toBeGreaterThanOrEqual(6);
+    expect(recent.length).toBeLessThanOrEqual(8);
+
+    const types = new Set(recent.map((e) => e.eventType));
+    for (const type of [
+      "EARNINGS",
+      "GUIDANCE",
+      "ANALYST_UPGRADE",
+      "ANALYST_DOWNGRADE",
+      "PRODUCT",
+      "REGULATION",
+    ]) {
+      expect(types.has(type)).toBe(true);
+    }
+
+    const within24h = dataset.marketEvents.filter((e) => ageMinutes(e) >= 0 && ageMinutes(e) <= 1440);
+    const tickers = new Set(within24h.map((e) => e.ticker));
+    for (const ticker of ["NVDA", "AMD", "TSM", "AVGO", "META", "MSFT", "AAPL", "TSLA"]) {
+      expect(tickers.has(ticker)).toBe(true);
+    }
   });
 
   it("covers the required event scenarios", () => {

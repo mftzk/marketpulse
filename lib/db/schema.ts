@@ -81,6 +81,9 @@ export const macroSeriesEnum = pgEnum("macro_series", [
   "SP500",
   "NASDAQ",
   "SOXX",
+  "XLK",
+  "XLC",
+  "XLY",
 ]);
 
 export const tickerRelationEnum = pgEnum("ticker_relation", [

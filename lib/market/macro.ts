@@ -18,7 +18,10 @@ export type MacroSeries =
   | "VIX"
   | "SP500"
   | "NASDAQ"
-  | "SOXX";
+  | "SOXX"
+  | "XLK"
+  | "XLC"
+  | "XLY";
 
 export interface MacroPoint {
   series: MacroSeries;
@@ -51,9 +54,12 @@ function fmt(value: number | null | undefined, digits = 1): string | null {
 
 /**
  * Derives the current regime from the latest macro snapshots. Pure and
- * deterministic for a given input.
+ * deterministic for a given input. `vixMean` is the 20-period mean of the VIX
+ * series (when available) and is quoted in the evidence, e.g.
+ * "Risk-on, subdued volatility: VIX 14.2 (below its 20-period mean), US10Y -3bp,
+ * semis leading the tape".
  */
-export function deriveRegime(points: MacroPoint[]): Regime {
+export function deriveRegime(points: MacroPoint[], opts?: { vixMean?: number | null }): Regime {
   const vix = seriesPoint(points, "VIX");
   const us10y = seriesPoint(points, "US10Y");
   const sp500 = seriesPoint(points, "SP500");
@@ -62,6 +68,7 @@ export function deriveRegime(points: MacroPoint[]): Regime {
   const dxy = seriesPoint(points, "DXY");
 
   const evidence: string[] = [];
+  const vixMean = opts?.vixMean ?? null;
 
   let riskScore = 0;
   if (vix && isFiniteNumber(vix.value)) {
@@ -71,13 +78,23 @@ export function deriveRegime(points: MacroPoint[]): Regime {
       riskScore -= 1;
     }
     const vixText = fmt(vix.value) !== null ? `VIX ${fmt(vix.value)}` : "VIX";
+    const relative =
+      vixMean !== null && isFiniteNumber(vixMean)
+        ? vix.value < vixMean
+          ? " (below its 20-period mean)"
+          : vix.value > vixMean
+            ? " (above its 20-period mean)"
+            : " (at its 20-period mean)"
+        : "";
     const trend =
       vix.change !== null && vix.change !== undefined && isFiniteNumber(vix.change)
         ? vix.change > 0
-          ? " rising"
-          : " falling"
+          ? ", rising"
+          : vix.change < 0
+            ? ", falling"
+            : ""
         : "";
-    evidence.push(`${vixText}${trend}`);
+    evidence.push(`${vixText}${relative}${trend}`);
   }
 
   if (us10y && isFiniteNumber(us10y.change ?? NaN)) {
@@ -116,15 +133,20 @@ export function deriveRegime(points: MacroPoint[]): Regime {
     }
   }
 
-  const lowVolatility = vix ? isFiniteNumber(vix.value) && vix.value < 16 : false;
+  const vixValue = vix && isFiniteNumber(vix.value) ? vix.value : null;
+  const lowVolatility = vixValue !== null && vixValue < 16;
+  const highVolatility = vixValue !== null && vixValue > 22;
   const label = riskScore > 0 ? "Risk-on" : riskScore < 0 ? "Risk-off" : "Neutral";
+
+  const volatility =
+    lowVolatility ? "subdued volatility" : highVolatility ? "elevated volatility" : "moderate volatility";
 
   const description =
     label === "Risk-on"
-      ? `Risk-on${lowVolatility ? ", low volatility" : ""}`
+      ? `Risk-on, ${volatility}`
       : label === "Risk-off"
-        ? "Risk-off"
-        : "Neutral market conditions";
+        ? `Risk-off, ${volatility}`
+        : `Neutral market conditions, ${volatility}`;
 
   return { label, description, evidence };
 }

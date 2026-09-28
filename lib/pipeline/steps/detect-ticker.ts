@@ -1,4 +1,4 @@
-import { eq, isNull, or, sql } from "drizzle-orm";
+import { eq, gte } from "drizzle-orm";
 
 import { detectTickerSymbols } from "@/lib/analysis/ticker-detect";
 import { companies, newsArticles, stocks } from "@/lib/db/schema";
@@ -7,7 +7,9 @@ import type { JobResult } from "@/lib/pipeline/registry";
 
 /**
  * Step 3: `detect_ticker` — cashtag/name/symbol detection against the active
- * universe, enriching `news_articles.tickers_raw` where missing.
+ * universe. Examines every article fetched in the recent window (so `processed`
+ * is an honest count of articles examined) and enriches `tickers_raw` where it is
+ * missing or empty. Articles that already carry tickers are left untouched.
  */
 
 const RECENT_WINDOW_MS = 60 * 60_000;
@@ -25,17 +27,14 @@ export async function detectTicker(ctx: PipelineContext): Promise<JobResult> {
     const candidates = await ctx.db
       .select()
       .from(newsArticles)
-      .where(
-        or(
-          isNull(newsArticles.tickersRaw),
-          sql`${newsArticles.tickersRaw} = '[]'::jsonb`,
-        ),
-      )
+      .where(gte(newsArticles.fetchedAt, cutoff))
       .limit(200);
 
     let processed = 0;
     for (const article of candidates) {
-      if (article.fetchedAt && article.fetchedAt.getTime() < cutoff.getTime()) {
+      processed += 1;
+      const existing = article.tickersRaw ?? [];
+      if (existing.length > 0) {
         continue;
       }
       const text = `${article.headline} ${article.body ?? ""}`;
@@ -47,7 +46,6 @@ export async function detectTicker(ctx: PipelineContext): Promise<JobResult> {
         .update(newsArticles)
         .set({ tickersRaw: detected, updatedAt: ctx.now })
         .where(eq(newsArticles.id, article.id));
-      processed += 1;
     }
 
     return {

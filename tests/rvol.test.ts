@@ -68,4 +68,18 @@ describe("computeRvol", () => {
     expect(computeRvol(null, 250)).toBeNull();
     expect(computeRvol(500, 0)).toBeNull();
   });
+
+  it("stays in a realistic band for synthetic profile-based volume series", () => {
+    const adv = 40_000_000;
+    const factors = [0.3, 0.45, 0.8, 1, 1.4, 2, 2.7, 3];
+    for (const factor of factors) {
+      for (const elapsed of [30, 60, 120, 240, 360]) {
+        const expected = adv * volumeProfileFraction(elapsed);
+        const rvol = computeRvol(expected * factor, expected);
+        expect(rvol).not.toBeNull();
+        expect(rvol as number).toBeGreaterThanOrEqual(0.3);
+        expect(rvol as number).toBeLessThanOrEqual(3);
+      }
+    }
+  });
 });

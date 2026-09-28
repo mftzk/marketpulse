@@ -171,7 +171,7 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
             eventId,
             ticker: affected,
             relation: "affected",
-            isDirect: false,
+            isDirect: true,
           })
           .onConflictDoNothing();
       }

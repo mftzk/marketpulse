@@ -72,9 +72,26 @@ export interface MarketSnapshot {
   rvol: number | null;
   cumulativeVolume: number;
   intervalVolume: number;
+  expectedVolumeToDate: number | null;
   prevClose: number | null;
   dayHigh: number | null;
   dayLow: number | null;
+}
+
+/**
+ * Daily context for a ticker (§10). Used by the pipeline to persist daily
+ * technical context (SMA50, prior-day levels, 52-week distance, gap).
+ */
+export interface DailyStats {
+  open: number;
+  prevClose: number;
+  dayHigh: number;
+  dayLow: number;
+  prevDayHigh: number;
+  prevDayLow: number;
+  high52w: number;
+  low52w: number;
+  avgDailyVolume: number;
 }
 
 export type ExpectationMetric = "eps" | "revenue" | "guidance";
@@ -118,6 +135,10 @@ export interface MarketDataProvider {
     opts: { from: Date; to: Date; intervalMinutes?: number },
   ): Promise<Bar[]>;
   snapshot(ticker: string, at?: Date): Promise<MarketSnapshot | null>;
+  /** Deterministic daily bars (most recent `count` trading days, oldest first). */
+  dailyBars(ticker: string, count: number, at?: Date): Promise<Bar[]>;
+  /** Daily levels (prior-day high/low, today's high/low, 52-week distance inputs). */
+  dailyStats(ticker: string, at?: Date): Promise<DailyStats | null>;
 }
 
 export interface FundamentalDataProvider {

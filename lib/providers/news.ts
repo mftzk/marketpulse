@@ -41,31 +41,71 @@ const backfillArticles = demoData.backfillArticles as (opts: {
 
 const rawSources = demoData.NEWS_SOURCES as RawNewsSource[];
 
+/**
+ * Live scenario bank (§10). Roughly one in three entries leaves `tickersRaw`
+ * empty but names the company in the text, so `detect_ticker` has work to do;
+ * the rest arrive pre-tagged (as a wired feed would).
+ */
 const LIVE_SCENARIOS: { headline: string; body: string; tickersRaw: string[] }[] = [
   {
-    headline: "Chipmaker posts quarterly beat, raises forward outlook",
-    body: "The company reported earnings and revenue above consensus and lifted guidance.",
-    tickersRaw: ["NVDA"],
+    headline: "NVIDIA posts quarterly beat, raises forward outlook",
+    body: "NVIDIA reported earnings and revenue above consensus and lifted guidance.",
+    tickersRaw: [],
   },
   {
-    headline: "Software giant misses revenue estimate",
+    headline: "Microsoft misses revenue estimate",
     body: "Quarterly revenue came in below consensus on softer enterprise demand.",
     tickersRaw: ["MSFT"],
   },
   {
-    headline: "EV maker announces new model and pricing",
+    headline: "Tesla announces new model and pricing",
     body: "The automaker unveiled a new model with aggressive pricing.",
     tickersRaw: ["TSLA"],
   },
   {
-    headline: "Analyst desk raises rating on hardware name",
-    body: "A research desk lifted its rating citing improving fundamentals.",
+    headline: "Advanced Micro Devices upgraded by a major research desk",
+    body: "A research desk lifted its rating on Advanced Micro Devices citing improving fundamentals.",
+    tickersRaw: [],
+  },
+  {
+    headline: "Meta Platforms faces a new regulatory probe",
+    body: "A regulator announced a review of certain Meta Platforms advertising practices.",
+    tickersRaw: [],
+  },
+  {
+    headline: "Broadcom signs a large supply agreement",
+    body: "Broadcom announced a multi-year supply agreement with a major cloud customer.",
+    tickersRaw: ["AVGO"],
+  },
+  {
+    headline: "Apple unveils a new product line",
+    body: "Apple announced a new product line aimed at expanding its services attach rate.",
+    tickersRaw: ["AAPL"],
+  },
+  {
+    headline: "Taiwan Semiconductor raises full-year guidance",
+    body: "Taiwan Semiconductor lifted its full-year outlook above consensus on strong demand.",
+    tickersRaw: [],
+  },
+  {
+    headline: "NVIDIA authorizes a share repurchase program",
+    body: "NVIDIA authorized an expanded share repurchase program.",
+    tickersRaw: ["NVDA"],
+  },
+  {
+    headline: "AMD insider discloses a share sale",
+    body: "An Advanced Micro Devices executive disclosed the sale of shares under a pre-arranged plan.",
     tickersRaw: ["AMD"],
   },
   {
-    headline: "Regulator opens review of social platform",
-    body: "A regulator announced a review of certain platform practices.",
-    tickersRaw: ["META"],
+    headline: "Tesla named in a new lawsuit over driver assistance claims",
+    body: "A lawsuit was filed against Tesla alleging misleading driver assistance claims.",
+    tickersRaw: [],
+  },
+  {
+    headline: "Microsoft announces a strategic partnership",
+    body: "Microsoft announced a strategic partnership to co-develop new cloud capabilities.",
+    tickersRaw: ["MSFT"],
   },
 ];
 
