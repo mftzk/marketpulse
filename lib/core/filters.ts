@@ -60,21 +60,23 @@ export const sortFilter = z
   .enum(["impact_desc", "published_desc", "impact_asc"])
   .default("impact_desc");
 
-export const eventFiltersSchema = z.object({
-  ticker: tickerFilter.optional(),
-  sector: sectorFilter.optional(),
-  event_type: eventTypeFilter.optional(),
-  min_impact: minImpactFilter.optional(),
-  max_impact: maxImpactFilter.optional(),
-  source: sourceFilter.optional(),
-  max_age_minutes: maxAgeMinutesFilter.optional(),
-  session: sessionFilter.optional(),
-  catalyst_direction: catalystDirectionFilter.optional(),
-  q: qFilter.optional(),
-  sort: sortFilter,
-  limit: limitFilter,
-  offset: offsetFilter,
-});
+export const eventFiltersSchema = z
+  .object({
+    ticker: tickerFilter.optional(),
+    sector: sectorFilter.optional(),
+    event_type: eventTypeFilter.optional(),
+    min_impact: minImpactFilter.optional(),
+    max_impact: maxImpactFilter.optional(),
+    source: sourceFilter.optional(),
+    max_age_minutes: maxAgeMinutesFilter.optional(),
+    session: sessionFilter.optional(),
+    catalyst_direction: catalystDirectionFilter.optional(),
+    q: qFilter.optional(),
+    sort: sortFilter,
+    limit: limitFilter,
+    offset: offsetFilter,
+  })
+  .strict();
 
 export type EventFilters = z.infer<typeof eventFiltersSchema>;
 

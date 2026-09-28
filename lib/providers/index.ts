@@ -18,9 +18,11 @@ import type {
 export function getNewsProvider(): NewsProvider {
   switch (config.newsProvider) {
     case "mock":
-      return new MockNewsProvider();
+      // `live` keeps emitting fresh articles on every pipeline tick (the real-time feed);
+      // `backfill` replays the deterministic historical dataset (used by the seeder).
+      return new MockNewsProvider({ mode: config.newsMode });
     default:
-      return new MockNewsProvider();
+      return new MockNewsProvider({ mode: config.newsMode });
   }
 }
 

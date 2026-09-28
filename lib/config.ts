@@ -80,6 +80,7 @@ export interface Config {
   llmModel: string;
   llmConfigured: boolean;
   newsProvider: "mock";
+  newsMode: "backfill" | "live";
   marketProvider: "mock";
   fundamentalProvider: "mock";
   pipelineAutorun: boolean;
@@ -87,6 +88,12 @@ export interface Config {
   logLevel: LogLevel;
   appUrl: string | null;
   isProduction: boolean;
+  alertWebhookUrl: string | null;
+  alertTelegramBotToken: string | null;
+  alertTelegramChatId: string | null;
+  alertDiscordWebhookUrl: string | null;
+  alertSlackWebhookUrl: string | null;
+  smtpUrl: string | null;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = readEnv()): Config {
@@ -110,6 +117,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     llmModel,
     llmConfigured: llmApiKey !== null,
     newsProvider: parseProvider(nonEmpty(env.NEWS_PROVIDER), "mock"),
+    newsMode: nonEmpty(env.NEWS_MODE) === "backfill" ? "backfill" : "live",
     marketProvider: parseProvider(nonEmpty(env.MARKET_PROVIDER), "mock"),
     fundamentalProvider: parseProvider(nonEmpty(env.FUNDAMENTAL_PROVIDER), "mock"),
     pipelineAutorun: parseBoolean(nonEmpty(env.PIPELINE_AUTORUN), false),
@@ -117,6 +125,12 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     logLevel,
     appUrl,
     isProduction: nonEmpty(env.NODE_ENV) === "production",
+    alertWebhookUrl: nonEmpty(env.ALERT_WEBHOOK_URL),
+    alertTelegramBotToken: nonEmpty(env.ALERT_TELEGRAM_BOT_TOKEN),
+    alertTelegramChatId: nonEmpty(env.ALERT_TELEGRAM_CHAT_ID),
+    alertDiscordWebhookUrl: nonEmpty(env.ALERT_DISCORD_WEBHOOK_URL),
+    alertSlackWebhookUrl: nonEmpty(env.ALERT_SLACK_WEBHOOK_URL),
+    smtpUrl: nonEmpty(env.SMTP_URL),
   };
 }
 

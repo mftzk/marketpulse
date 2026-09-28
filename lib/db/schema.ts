@@ -583,13 +583,15 @@ export const usersEmailLowerIdx = uniqueIndex("users_email_lower_idx").on(
 export const newsArticlesPublishedAtIdx = index("news_articles_published_at_idx").on(
   sql`${newsArticles.publishedAt} DESC`,
 );
-export const newsArticlesEventIdIdx = index("news_articles_event_id_idx").on(newsArticles.eventId);
+export const newsArticlesEventIdIdx = index("news_articles_event_id_idx").on(
+  sql`${newsArticles.eventId}`,
+);
 export const marketEventsTickerPublishedAtIdx = index("market_events_ticker_published_at_idx").on(
-  marketEvents.ticker,
+  sql`${marketEvents.ticker}`,
   sql`${marketEvents.publishedAt} DESC`,
 );
 export const marketEventsEventTypeIdx = index("market_events_event_type_idx").on(
-  marketEvents.eventType,
+  sql`${marketEvents.eventType}`,
 );
 export const marketEventsPublishedAtIdx = index("market_events_published_at_idx").on(
   sql`${marketEvents.publishedAt} DESC`,
@@ -601,13 +603,13 @@ export const impactScoresScoreIdx = index("impact_scores_score_idx").on(
   sql`${impactScores.score} DESC`,
 );
 export const eventArticlesArticleIdIdx = index("event_articles_article_id_idx").on(
-  eventArticles.articleId,
+  sql`${eventArticles.articleId}`,
 );
-export const eventTickersTickerIdx = index("event_tickers_ticker_idx").on(eventTickers.ticker);
+export const eventTickersTickerIdx = index("event_tickers_ticker_idx").on(sql`${eventTickers.ticker}`);
 export const alertEventsRuleIdTriggeredAtIdx = index("alert_events_rule_id_triggered_at_idx").on(
-  alertEvents.ruleId,
+  sql`${alertEvents.ruleId}`,
   sql`${alertEvents.triggeredAt} DESC`,
 );
 export const marketEventsDedupeKeyUniq = uniqueIndex("market_events_dedupe_key_uniq")
-  .on(marketEvents.dedupeKey)
+  .on(sql`${marketEvents.dedupeKey}`)
   .where(sql`${marketEvents.dedupeKey} IS NOT NULL`);

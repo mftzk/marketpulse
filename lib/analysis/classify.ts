@@ -1,0 +1,250 @@
+import type { Classification } from "@/lib/analysis/classification-schema";
+import { classificationEnvelopeSchema } from "@/lib/analysis/classification-schema";
+import type { LLMClient } from "@/lib/analysis/llm-client";
+import { logger } from "@/lib/logger";
+
+/**
+ * News classification (§7 step 4). Batches headlines (≤10 per call) through an
+ * OpenAI-compatible LLM and validates the parsed envelope against the strict
+ * zod schema. On any failure the batch falls back to `classifyByRules()`.
+ *
+ * IMPORTANT: `sentiment` and `catalyst_direction` describe *direction* only.
+ * They must NOT determine `event_importance` by themselves. In the rules
+ * fallback, `event_importance` is derived from the event type's base importance
+ * and explicit magnitude cues in the text — never from the sentiment sign.
+ */
+
+export interface ClassifyInput {
+  id: string;
+  headline: string;
+  body: string | null;
+  tickersRaw: string[];
+  sourceQuality: number;
+}
+
+export type ClassifySource = "llm" | "rules";
+
+export interface ClassifiedArticle {
+  articleId: string;
+  classification: Classification;
+  source: ClassifySource;
+}
+
+const BATCH_SIZE = 10;
+
+function buildPrompt(items: ClassifyInput[]): string {
+  const lines = items
+    .map((item, index) => {
+      const body = item.body ? ` body="${item.body}"` : "";
+      return `${index}. headline="${item.headline}"${body} tickers=${JSON.stringify(item.tickersRaw)}`;
+    })
+    .join("\n");
+
+  return [
+    "Classify the following news items into structured market events.",
+    "Return ONLY a JSON object with this exact shape:",
+    '{"classifications":[{"ticker":"AAPL","company":"Apple","event_type":"PRODUCT","summary":"...","sentiment":0.5,"catalyst_direction":"positive","company_relevance":1.0,"event_importance":0.6,"source_quality":0.9,"affected_tickers":["AAPL"],"affected_sectors":["technology"],"reasoning":"..."}]}',
+    "Rules:",
+    "- ticker is the primary ticker symbol (uppercase) or null.",
+    "- event_type is one of: EARNINGS, GUIDANCE, PRODUCT, CONTRACT, PARTNERSHIP, M&A, ANALYST_UPGRADE, ANALYST_DOWNGRADE, REGULATION, LAWSUIT, MANAGEMENT, BUYBACK, DIVIDEND, OFFERING, INSIDER_TRANSACTION, MACRO, OTHER.",
+    "- sentiment is -1..1 (direction, NOT importance).",
+    "- catalyst_direction is positive|negative|neutral|mixed.",
+    "- event_importance (0..1) reflects the magnitude of the event versus expectations — never the sentiment sign alone.",
+    "- company_relevance is 0..1.",
+    "- source_quality is 0..1.",
+    "- summary is 10-600 chars; reasoning is 10-1200 chars.",
+    "- affected_tickers max 12; affected_sectors max 6.",
+    "Items:",
+    lines,
+  ].join("\n");
+}
+
+function parseEnvelope(content: string): Classification[] | null {
+  try {
+    const parsed: unknown = JSON.parse(content);
+    const result = classificationEnvelopeSchema.safeParse(parsed);
+    if (!result.success) {
+      return null;
+    }
+    return result.data.classifications;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rules fallback
+// ---------------------------------------------------------------------------
+
+const POSITIVE_WORDS =
+  /\b(beat|beats|tops|exceeds|raise(?:s|d)?|upgrade(?:s|d)?|outperform(?:s|ed)?|surge(?:s|d)?|soar(?:s|ed)?|jump(?:s|ed)?|record|strong|growth|win(?:s)?|approve(?:s|d)?|authorize(?:s|d)?|unveil(?:s|ed)?|launch(?:es|ed)?|partnership|agreement|buyback|repurchase|increase(?:s|d)?)\b/i;
+
+const NEGATIVE_WORDS =
+  /\b(miss(?:es|ed)?|below|misses|cut(?:s)?|downgrade(?:s|d)?|underperform(?:s|ed)?|plunge(?:s|d)?|drop(?:s|ped)?|fall(?:s|en)?|probe|investigation|lawsuit|probe(?:s|d)?|offering|sale of shares|sell(?:s)?|weak|loss|soft|decline(?:s|d)?)\b/i;
+
+interface EventTypeRule {
+  type: Classification["event_type"];
+  pattern: RegExp;
+}
+
+// Ordered: more specific rules first.
+const EVENT_TYPE_RULES: EventTypeRule[] = [
+  { type: "ANALYST_UPGRADE", pattern: /\b(analyst|desk|firm|upgraded|upgrade|raises rating|price target raised)\b.*\b(upgrade|raises|raised)\b/i },
+  { type: "ANALYST_DOWNGRADE", pattern: /\b(analyst|desk|firm|downgraded|downgrade|cuts rating|lowers rating)\b.*\b(downgrade|downgrades|cuts|cut)\b/i },
+  { type: "GUIDANCE", pattern: /\b(guidance|outlook|forecast|full-year|fiscal year|raises full-year|cuts full-year|lowers.*outlook|raises.*outlook)\b/i },
+  { type: "EARNINGS", pattern: /\b(earnings|quarterly results|reports quarterly|quarterly earnings|q[1-4] results|eps|revenue.*beat|revenue.*miss|results above|results below|fell short)\b/i },
+  { type: "M&A", pattern: /\b(acquire(?:s|d)?|acquisition|merger|merge(?:s|d)?|takeover|buyout|to acquire)\b/i },
+  { type: "BUYBACK", pattern: /\b(buyback|share repurchase|repurchase program|stock buyback)\b/i },
+  { type: "OFFERING", pattern: /\b(secondary offering|share offering|public offering|stock offering)\b/i },
+  { type: "INSIDER_TRANSACTION", pattern: /\b(insider|executive.*(sold|bought)|discloses.*(sale|purchase)|form 4)\b/i },
+  { type: "DIVIDEND", pattern: /\b(dividend|payout)\b/i },
+  { type: "PARTNERSHIP", pattern: /\b(partnership|strategic alliance|collaboration|teams up)\b/i },
+  { type: "CONTRACT", pattern: /\b(contract|supply agreement|deal worth|wins contract|awarded)\b/i },
+  { type: "REGULATION", pattern: /\b(regulator|regulatory|probe|investigation|antitrust|fcc|sec inquiry|ftc)\b/i },
+  { type: "LAWSUIT", pattern: /\b(lawsuit|sues|sued|litigation|class action)\b/i },
+  { type: "MANAGEMENT", pattern: /\b(ceo|cfo|executive|leadership|appoints|resign(?:s|ed)?|steps down)\b/i },
+  { type: "PRODUCT", pattern: /\b(product|launch(?:es|ed)?|unveil(?:s|ed)?|new model|new chip|releases)\b/i },
+  { type: "MACRO", pattern: /\b(fed|federal reserve|interest rate|cpi|inflation|gdp|jobs report|unemployment|macro|economic data|yields|treasury)\b/i },
+];
+
+const IMPORTANCE_HINTS: Array<{ pattern: RegExp; boost: number }> = [
+  { pattern: /\b(record|blowout|surprise|surge|plunge|shock|unexpectedly)\b/i, boost: 0.2 },
+  { pattern: /\b(beat|miss)\b/i, boost: 0.1 },
+];
+
+function detectEventType(text: string): Classification["event_type"] {
+  for (const rule of EVENT_TYPE_RULES) {
+    if (rule.pattern.test(text)) {
+      return rule.type;
+    }
+  }
+  return "OTHER";
+}
+
+function detectSentiment(text: string): number {
+  const pos = POSITIVE_WORDS.test(text) ? 1 : 0;
+  const neg = NEGATIVE_WORDS.test(text) ? 1 : 0;
+  if (pos && neg) {
+    return 0.05;
+  }
+  if (pos) {
+    return 0.55;
+  }
+  if (neg) {
+    return -0.55;
+  }
+  return 0;
+}
+
+function directionForSentiment(sentiment: number): Classification["catalyst_direction"] {
+  if (sentiment > 0.2) {
+    return "positive";
+  }
+  if (sentiment < -0.2) {
+    return "negative";
+  }
+  return "neutral";
+}
+
+/**
+ * Keyword/pattern classification fallback. `event_importance` is derived from
+ * the event type's base importance plus magnitude cues in the text — explicitly
+ * NOT from `sentiment`/`catalyst_direction` (direction must not drive
+ * importance).
+ */
+export function classifyByRules(
+  input: Omit<ClassifyInput, "id">,
+): Classification {
+  const text = `${input.headline} ${input.body ?? ""}`;
+  const eventType = detectEventType(text);
+  const sentiment = detectSentiment(text);
+  const direction = directionForSentiment(sentiment);
+
+  let importance = 0.4;
+  for (const hint of IMPORTANCE_HINTS) {
+    if (hint.pattern.test(text)) {
+      importance += hint.boost;
+    }
+  }
+  if (eventType === "EARNINGS" || eventType === "GUIDANCE") {
+    importance = Math.max(importance, 0.8);
+  } else if (eventType === "M&A") {
+    importance = Math.max(importance, 0.75);
+  }
+  importance = Math.max(0.1, Math.min(1, importance));
+
+  const ticker = input.tickersRaw[0]?.toUpperCase() ?? null;
+  const tickerValid = ticker !== null && /^[A-Z][A-Z0-9.\-]{0,9}$/.test(ticker);
+
+  const summary =
+    input.body && input.body.trim().length >= 10
+      ? input.body.trim().slice(0, 600)
+      : input.headline.trim().slice(0, 600);
+
+  return {
+    ticker: tickerValid ? ticker : null,
+    company: null,
+    event_type: eventType,
+    summary,
+    sentiment,
+    catalyst_direction: direction,
+    company_relevance: tickerValid ? 1 : 0.5,
+    event_importance: importance,
+    source_quality: Math.max(0, Math.min(1, input.sourceQuality)),
+    affected_tickers: input.tickersRaw
+      .map((t) => t.toUpperCase())
+      .filter((t) => /^[A-Z][A-Z0-9.\-]{0,9}$/.test(t))
+      .slice(0, 12),
+    affected_sectors: [],
+    reasoning: `Detected ${eventType} event from headline text; direction reflects ${direction} language while importance is derived from the event type and magnitude cues, not sentiment alone.`,
+  };
+}
+
+/**
+ * Classifies a batch of articles. Batches into ≤10 items, validates LLM output
+ * strictly, and falls back to rules per-batch on any failure. The per-article
+ * `source` is `"llm"` or `"rules"`.
+ */
+export async function classifyArticles(
+  items: ClassifyInput[],
+  opts: { llm: LLMClient },
+): Promise<ClassifiedArticle[]> {
+  const results: ClassifiedArticle[] = [];
+  const useLLM = opts.llm.isConfigured();
+
+  for (let start = 0; start < items.length; start += BATCH_SIZE) {
+    const chunk = items.slice(start, start + BATCH_SIZE);
+
+    if (useLLM) {
+      const prompt = buildPrompt(chunk);
+      const llmResult = await opts.llm.complete(prompt);
+      if (llmResult.ok) {
+        const classifications = parseEnvelope(llmResult.content);
+        if (classifications !== null && classifications.length === chunk.length) {
+          chunk.forEach((item, index) => {
+            results.push({
+              articleId: item.id,
+              classification: classifications[index],
+              source: "llm",
+            });
+          });
+          continue;
+        }
+        logger.warn("llm_classification_invalid", {
+          event: "analysis.classify",
+          batchSize: chunk.length,
+        });
+      }
+    }
+
+    chunk.forEach((item) => {
+      results.push({
+        articleId: item.id,
+        classification: classifyByRules(item),
+        source: "rules",
+      });
+    });
+  }
+
+  return results;
+}
