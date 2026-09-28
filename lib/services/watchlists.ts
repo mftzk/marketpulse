@@ -1,18 +1,11 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, inArray } from "drizzle-orm";
 
 import type { WatchlistDTO, WatchlistStockDTO } from "@/lib/core/detail";
 import { AppError } from "@/lib/errors";
 import { getDb } from "@/lib/db/client";
-import {
-  companies,
-  impactScores,
-  marketEvents,
-  priceSnapshots,
-  users,
-  volumeSnapshots,
-  watchlistStocks,
-  watchlists,
-} from "@/lib/db/schema";
+import { latestEventByTicker } from "@/lib/db/queries/events";
+import { latestPriceSnapshots, latestVolumeSnapshots } from "@/lib/db/queries/market-data";
+import { companies, users, watchlistStocks, watchlists } from "@/lib/db/schema";
 import { num } from "@/lib/services/shared";
 
 const DEMO_EMAIL = "demo@marketpulse.dev";
@@ -27,25 +20,43 @@ async function getDemoUserId(): Promise<string> {
   return user.id;
 }
 
+function emptyStock(ticker: string, note: string | null = null): WatchlistStockDTO {
+  return {
+    ticker,
+    note,
+    price: null,
+    change_pct: null,
+    rvol: null,
+    latest_catalyst: null,
+    catalyst_age_minutes: null,
+    impact_score: null,
+  };
+}
+
+/**
+ * Batched per-ticker rows for every watchlist at once (phase 3c): one price
+ * query, one volume query and one latest-event query for ALL tickers, instead
+ * of three queries per ticker. Do not loop a query inside this function.
+ */
 async function stockRows(tickers: string[]): Promise<Map<string, WatchlistStockDTO>> {
   const db = getDb();
+  const unique = [...new Set(tickers)].filter((t) => t.length > 0);
   const result = new Map<string, WatchlistStockDTO>();
+  if (unique.length === 0) {
+    return result;
+  }
 
-  for (const ticker of tickers) {
-    const price = (await db.select().from(priceSnapshots).where(eq(priceSnapshots.ticker, ticker)).orderBy(desc(priceSnapshots.ts)).limit(1))[0] ?? null;
-    const volume = (await db.select().from(volumeSnapshots).where(eq(volumeSnapshots.ticker, ticker)).orderBy(desc(volumeSnapshots.ts)).limit(1))[0] ?? null;
-    const event = (await db
-      .select({
-        headline: marketEvents.headline,
-        publishedAt: marketEvents.publishedAt,
-        score: impactScores.score,
-      })
-      .from(marketEvents)
-      .leftJoin(impactScores, eq(impactScores.eventId, marketEvents.id))
-      .where(eq(marketEvents.ticker, ticker))
-      .orderBy(desc(marketEvents.publishedAt))
-      .limit(1))[0] ?? null;
+  const [prices, volumes, events] = await Promise.all([
+    latestPriceSnapshots(db, unique),
+    latestVolumeSnapshots(db, unique),
+    latestEventByTicker(db, unique),
+  ]);
 
+  const now = Date.now();
+  for (const ticker of unique) {
+    const price = prices.get(ticker) ?? null;
+    const volume = volumes.get(ticker) ?? null;
+    const event = events.get(ticker) ?? null;
     result.set(ticker, {
       ticker,
       note: null,
@@ -53,7 +64,9 @@ async function stockRows(tickers: string[]): Promise<Map<string, WatchlistStockD
       change_pct: num(price?.changePctDaily),
       rvol: num(volume?.rvol),
       latest_catalyst: event?.headline ?? null,
-      catalyst_age_minutes: event?.publishedAt ? Math.max(0, Math.floor((Date.now() - event.publishedAt.getTime()) / 60_000)) : null,
+      catalyst_age_minutes: event?.publishedAt
+        ? Math.max(0, Math.floor((now - event.publishedAt.getTime()) / 60_000))
+        : null,
       impact_score: num(event?.score),
     });
   }
@@ -61,28 +74,48 @@ async function stockRows(tickers: string[]): Promise<Map<string, WatchlistStockD
   return result;
 }
 
+function hydrate(
+  stocks: (typeof watchlistStocks.$inferSelect)[],
+  stockMap: Map<string, WatchlistStockDTO>,
+): WatchlistStockDTO[] {
+  return stocks.map((s) => ({
+    ...(stockMap.get(s.ticker) ?? emptyStock(s.ticker)),
+    note: s.note ?? null,
+  }));
+}
+
 export async function listWatchlists(): Promise<WatchlistDTO[]> {
   const db = getDb();
   const userId = await getDemoUserId();
   const lists = await db.select().from(watchlists).where(eq(watchlists.userId, userId)).orderBy(desc(watchlists.isDefault), asc(watchlists.name));
-
-  const result: WatchlistDTO[] = [];
-  for (const list of lists) {
-    const stocks = await db.select().from(watchlistStocks).where(eq(watchlistStocks.watchlistId, list.id));
-    const tickers = stocks.map((s) => s.ticker);
-    const stockMap = await stockRows(tickers);
-    const stockNotes = new Map(stocks.map((s) => [s.ticker, s.note]));
-
-    result.push({
-      id: list.id,
-      name: list.name,
-      description: list.description,
-      is_default: list.isDefault,
-      stocks: stocks.map((s) => ({ ...(stockMap.get(s.ticker) ?? { ticker: s.ticker, note: null, price: null, change_pct: null, rvol: null, latest_catalyst: null, catalyst_age_minutes: null, impact_score: null }), note: stockNotes.get(s.ticker) ?? null })),
-    });
+  if (lists.length === 0) {
+    return [];
   }
 
-  return result;
+  // One query for every list's tickers, then one batched stock lookup.
+  const allStocks = await db
+    .select()
+    .from(watchlistStocks)
+    .where(inArray(watchlistStocks.watchlistId, lists.map((l) => l.id)));
+  const stocksByList = new Map<string, (typeof allStocks)[number][]>();
+  for (const stock of allStocks) {
+    const list = stocksByList.get(stock.watchlistId);
+    if (list) {
+      list.push(stock);
+    } else {
+      stocksByList.set(stock.watchlistId, [stock]);
+    }
+  }
+
+  const stockMap = await stockRows(allStocks.map((s) => s.ticker));
+
+  return lists.map((list) => ({
+    id: list.id,
+    name: list.name,
+    description: list.description,
+    is_default: list.isDefault,
+    stocks: hydrate(stocksByList.get(list.id) ?? [], stockMap),
+  }));
 }
 
 export async function createWatchlist(input: { name: string; description?: string }): Promise<WatchlistDTO> {
@@ -110,15 +143,13 @@ export async function getWatchlist(id: string): Promise<WatchlistDTO | null> {
     return null;
   }
   const stocks = await db.select().from(watchlistStocks).where(eq(watchlistStocks.watchlistId, id));
-  const tickers = stocks.map((s) => s.ticker);
-  const stockMap = await stockRows(tickers);
-  const notes = new Map(stocks.map((s) => [s.ticker, s.note]));
+  const stockMap = await stockRows(stocks.map((s) => s.ticker));
   return {
     id: list.id,
     name: list.name,
     description: list.description,
     is_default: list.isDefault,
-    stocks: stocks.map((s) => ({ ...(stockMap.get(s.ticker) ?? { ticker: s.ticker, note: null, price: null, change_pct: null, rvol: null, latest_catalyst: null, catalyst_age_minutes: null, impact_score: null }), note: notes.get(s.ticker) ?? null })),
+    stocks: hydrate(stocks, stockMap),
   };
 }
 

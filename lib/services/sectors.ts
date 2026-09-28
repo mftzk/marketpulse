@@ -1,14 +1,9 @@
-import { desc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 
 import { getDb } from "@/lib/db/client";
-import {
-  companies,
-  impactScores,
-  marketEvents,
-  priceSnapshots,
-  sectors,
-  volumeSnapshots,
-} from "@/lib/db/schema";
+import { latestEventByTicker } from "@/lib/db/queries/events";
+import { latestPriceSnapshots, latestVolumeSnapshots } from "@/lib/db/queries/market-data";
+import { companies, sectors } from "@/lib/db/schema";
 import { num } from "@/lib/services/shared";
 import { listEvents } from "@/lib/services/events";
 
@@ -19,32 +14,34 @@ export async function getSector(slug: string): Promise<Record<string, unknown> |
     return null;
   }
 
-  const etfPrice = sector.etfSymbol
-    ? (await db.select().from(priceSnapshots).where(eq(priceSnapshots.ticker, sector.etfSymbol)).orderBy(desc(priceSnapshots.ts)).limit(1))[0] ?? null
-    : null;
-
   const sectorCompanies = await db.select().from(companies).where(eq(companies.sectorId, sector.id));
+  const companyTickers = sectorCompanies.map((c) => c.ticker);
 
-  const stocks = [];
-  for (const company of sectorCompanies) {
-    const price = (await db.select().from(priceSnapshots).where(eq(priceSnapshots.ticker, company.ticker)).orderBy(desc(priceSnapshots.ts)).limit(1))[0] ?? null;
-    const volume = (await db.select().from(volumeSnapshots).where(eq(volumeSnapshots.ticker, company.ticker)).orderBy(desc(volumeSnapshots.ts)).limit(1))[0] ?? null;
-    const topEvent = (await db
-      .select({ score: impactScores.score })
-      .from(marketEvents)
-      .leftJoin(impactScores, eq(impactScores.eventId, marketEvents.id))
-      .where(eq(marketEvents.ticker, company.ticker))
-      .orderBy(desc(marketEvents.publishedAt))
-      .limit(1))[0] ?? null;
+  // Batched: one price query (incl. the ETF), one volume query and one
+  // latest-event query for every company in the sector (was 3 per company).
+  const [priceSnaps, volumeSnaps, latestEvents] = await Promise.all([
+    latestPriceSnapshots(db, [
+      ...companyTickers,
+      ...(sector.etfSymbol ? [sector.etfSymbol] : []),
+    ]),
+    latestVolumeSnapshots(db, companyTickers),
+    latestEventByTicker(db, companyTickers),
+  ]);
 
-    stocks.push({
+  const etfPrice = sector.etfSymbol ? priceSnaps.get(sector.etfSymbol) ?? null : null;
+
+  const stocks = sectorCompanies.map((company) => {
+    const price = priceSnaps.get(company.ticker) ?? null;
+    const volume = volumeSnaps.get(company.ticker) ?? null;
+    const topEvent = latestEvents.get(company.ticker) ?? null;
+    return {
       ticker: company.ticker,
       price: num(price?.price),
       change_pct: num(price?.changePctDaily),
       rvol: num(volume?.rvol),
       impact_score: num(topEvent?.score),
-    });
-  }
+    };
+  });
 
   const ranked = [...stocks].sort((a, b) => (b.change_pct ?? -Infinity) - (a.change_pct ?? -Infinity));
   const leaders = ranked.filter((s) => (s.change_pct ?? 0) > 0).slice(0, 3);

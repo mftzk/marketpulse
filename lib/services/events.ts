@@ -23,9 +23,11 @@ import {
 } from "@/lib/db/schema";
 import { computeImpactScore } from "@/lib/scoring/impact";
 import {
-  computeReactionInputs,
+  computeReactionInputsBatch,
+  computeReactionSummariesBatch,
   latestPriceSnapshots,
-  type ReactionInputs,
+  latestTechnicalSnapshots,
+  reactionRequestKey,
 } from "@/lib/db/queries/market-data";
 import { deriveMacroChange, deriveRegime, macroChangeUnit, type MacroPoint } from "@/lib/market/macro";
 import { getMarketDataProvider } from "@/lib/providers";
@@ -115,16 +117,6 @@ function baseQuery() {
     .leftJoin(impactScores, eq(impactScores.eventId, marketEvents.id))
     .leftJoin(newsArticles, eq(marketEvents.canonicalArticleId, newsArticles.id))
     .leftJoin(newsSources, eq(newsArticles.sourceId, newsSources.id));
-}
-
-async function latestTechnical(ticker: string): Promise<TechnicalRow | null> {
-  const rows = await getDb()
-    .select()
-    .from(technicalSnapshots)
-    .where(eq(technicalSnapshots.ticker, ticker))
-    .orderBy(desc(technicalSnapshots.ts))
-    .limit(1);
-  return rows[0] ?? null;
 }
 
 function atrPctFromTechnical(technical: TechnicalRow | null, lastPrice: number | null): number | null {
@@ -278,37 +270,35 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
   const eventIds = rows.map((r) => r.event.id);
   const tickers = [...new Set(rows.map((r) => r.event.ticker).filter((t): t is string => t !== null))];
 
-  const componentsMap = await componentsForEvents(eventIds);
-  const tickersMap = await tickersForEvents(eventIds);
-
+  // --- Constant-query assembly (phase 3c) ---------------------------------
+  // Every lookup below consumes the whole page at once. Do NOT reintroduce a
+  // per-row / per-ticker query here: the deployed container pays ~80–150 ms
+  // per round-trip, so a feed of 50 events would spend seconds in N+1s.
   const priceTickers = new Set<string>([...tickers, "SPY", "QQQ"]);
   for (const row of rows) {
     if (row.sectorEtf) {
       priceTickers.add(row.sectorEtf);
     }
   }
-  const priceSnaps = await latestPriceSnapshots(db, [...priceTickers]);
 
-  const technicalCache = new Map<string, TechnicalRow | null>();
-  for (const ticker of tickers) {
-    technicalCache.set(ticker, await latestTechnical(ticker));
+  const reactionRequests: { ticker: string; publishedAt: Date; sectorSlug: string | null }[] = [];
+  for (const row of rows) {
+    if (row.event.ticker !== null && row.event.publishedAt !== null) {
+      reactionRequests.push({
+        ticker: row.event.ticker,
+        publishedAt: row.event.publishedAt,
+        sectorSlug: row.sectorSlug,
+      });
+    }
   }
 
-  const reactionCache = new Map<string, ReactionInputs>();
-  const reactionFor = async (
-    ticker: string,
-    publishedAt: Date,
-    sectorSlug: string | null,
-  ): Promise<ReactionInputs> => {
-    const key = `${ticker}:${publishedAt.getTime()}:${sectorSlug ?? ""}`;
-    const cached = reactionCache.get(key);
-    if (cached) {
-      return cached;
-    }
-    const value = await computeReactionInputs(db, ticker, publishedAt, sectorSlug);
-    reactionCache.set(key, value);
-    return value;
-  };
+  const [componentsMap, tickersMap, priceSnaps, technicalMap, reactionMap] = await Promise.all([
+    componentsForEvents(eventIds),
+    tickersForEvents(eventIds),
+    latestPriceSnapshots(db, [...priceTickers]),
+    latestTechnicalSnapshots(db, tickers),
+    computeReactionSummariesBatch(db, reactionRequests),
+  ]);
 
   const spyPrice = priceSnaps.get("SPY") ?? null;
   const qqqPrice = priceSnaps.get("QQQ") ?? null;
@@ -319,11 +309,17 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
     const event = row.event;
     const ticker = event.ticker;
     const price = ticker ? priceSnaps.get(ticker) ?? null : null;
-    const technical = ticker ? technicalCache.get(ticker) ?? null : null;
+    const technical = ticker ? technicalMap.get(ticker) ?? null : null;
 
     const reaction =
       ticker && event.publishedAt
-        ? await reactionFor(ticker, event.publishedAt, row.sectorSlug)
+        ? reactionMap.get(
+            reactionRequestKey({
+              ticker,
+              publishedAt: event.publishedAt,
+              sectorSlug: row.sectorSlug,
+            }),
+          ) ?? null
         : null;
     const lastPrice = num(price?.price);
     const rvol = reaction?.rvol ?? null;
@@ -458,19 +454,31 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
   );
   const priceSnaps = await latestPriceSnapshots(db, priceTickers);
   const price = ticker ? priceSnaps.get(ticker) ?? null : null;
-  const technical = ticker ? await latestTechnical(ticker) : null;
+  const technical = ticker ? (await latestTechnicalSnapshots(db, [ticker])).get(ticker) ?? null : null;
   const lastPrice = num(price?.price);
 
+  // Batched (one price + one volume query); single event, so this is two
+  // round-trips rather than the four the per-event helper issued.
+  const reactionMap = await computeReactionInputsBatch(
+    db,
+    ticker && event.publishedAt
+      ? [{ ticker, publishedAt: event.publishedAt, sectorSlug: row.sectorSlug }]
+      : [],
+  );
   const reactionInputs =
     ticker && event.publishedAt
-      ? await computeReactionInputs(db, ticker, event.publishedAt, row.sectorSlug)
+      ? reactionMap.get(
+          reactionRequestKey({ ticker, publishedAt: event.publishedAt, sectorSlug: row.sectorSlug }),
+        ) ?? null
       : null;
   const rvol = reactionInputs?.rvol ?? null;
   const changeSincePub = reactionInputs?.stockMovePct ?? null;
 
-  const etRows = await db.select().from(eventTickers).where(eq(eventTickers.eventId, id)).orderBy(asc(eventTickers.relation));
-
-  const components = (await componentsForEvents([id])).get(id) ?? [];
+  // Components and related tickers for this single event, fetched together.
+  const [etRows, components] = await Promise.all([
+    db.select().from(eventTickers).where(eq(eventTickers.eventId, id)).orderBy(asc(eventTickers.relation)),
+    componentsForEvents([id]).then((map) => map.get(id) ?? []),
+  ]);
   const storedScore = num(row.score);
   const impact: EventCardDTO["impact"] =
     storedScore !== null

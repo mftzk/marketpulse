@@ -11,6 +11,7 @@ import {
   technicalSnapshots,
   volumeSnapshots,
 } from "@/lib/db/schema";
+import { latestPriceSnapshots } from "@/lib/db/queries/market-data";
 import { num } from "@/lib/services/shared";
 import { listEvents } from "@/lib/services/events";
 
@@ -65,10 +66,13 @@ export async function getStock(ticker: string): Promise<StockDTO | null> {
       .from(companies)
       .where(eq(companies.sectorId, company.sectorId));
     const peerTickers = peers.map((p) => p.ticker).filter((t) => t !== ticker);
-    for (const peerTicker of peerTickers) {
-      const peerPrice = (await db.select().from(priceSnapshots).where(eq(priceSnapshots.ticker, peerTicker)).orderBy(desc(priceSnapshots.ts)).limit(1))[0] ?? null;
-      related.push({ ticker: peerTicker, relation: "peer", change_pct: num(peerPrice?.changePctDaily) });
-    }
+    // One batched query for every peer's latest price (was one query per peer).
+    const peerPrices = await latestPriceSnapshots(db, peerTickers);
+    related = peerTickers.map((peerTicker) => ({
+      ticker: peerTicker,
+      relation: "peer",
+      change_pct: num(peerPrices.get(peerTicker)?.changePctDaily ?? null),
+    }));
   }
 
   return {

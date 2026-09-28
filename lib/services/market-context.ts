@@ -2,49 +2,52 @@ import { desc, eq } from "drizzle-orm";
 
 import { sessionFor } from "@/lib/core/session";
 import { getDb } from "@/lib/db/client";
-import {
-  companies,
-  impactScores,
-  macroSnapshots,
-  marketEvents,
-  priceSnapshots,
-  sectors,
-} from "@/lib/db/schema";
+import { topEventBySector } from "@/lib/db/queries/events";
+import { latestPriceSnapshots } from "@/lib/db/queries/market-data";
+import { companies, macroSnapshots, sectors } from "@/lib/db/schema";
 import { deriveMacroChange, deriveRegime, macroChangeUnit, type MacroPoint } from "@/lib/market/macro";
 import { num } from "@/lib/services/shared";
-
-async function latestPrice(ticker: string): Promise<(typeof priceSnapshots.$inferSelect) | null> {
-  const rows = await getDb()
-    .select()
-    .from(priceSnapshots)
-    .where(eq(priceSnapshots.ticker, ticker))
-    .orderBy(desc(priceSnapshots.ts))
-    .limit(1);
-  return rows[0] ?? null;
-}
 
 export async function getMarketContext(): Promise<Record<string, unknown>> {
   const db = getDb();
   const now = new Date();
 
-  const spy = await latestPrice("SPY");
-  const qqq = await latestPrice("QQQ");
-  const soxx = await latestPrice("SOXX");
-  const vix = await db.select().from(macroSnapshots).where(eq(macroSnapshots.series, "VIX" as never)).orderBy(desc(macroSnapshots.ts)).limit(1);
+  const [sectorRows, companyRows] = await Promise.all([
+    db.select().from(sectors),
+    db.select().from(companies),
+  ]);
 
-  const sectorRows = await db.select().from(sectors);
-  const companyRows = await db.select().from(companies);
+  // One batched price lookup for the index strip, every sector ETF and every
+  // company ticker (was one query per symbol/sector/company).
+  const priceTickers = [
+    ...new Set([
+      "SPY",
+      "QQQ",
+      "SOXX",
+      ...sectorRows.map((s) => s.etfSymbol).filter((s): s is string => Boolean(s)),
+      ...companyRows.map((c) => c.ticker),
+    ]),
+  ];
+  const [priceSnaps, topEvents, macroRows, vixRows] = await Promise.all([
+    latestPriceSnapshots(db, priceTickers),
+    topEventBySector(db, sectorRows.map((s) => s.id)),
+    db.select().from(macroSnapshots).orderBy(desc(macroSnapshots.ts)).limit(12),
+    db
+      .select()
+      .from(macroSnapshots)
+      .where(eq(macroSnapshots.series, "VIX" as never))
+      .orderBy(desc(macroSnapshots.ts))
+      .limit(20),
+  ]);
 
-  const sectorsData = [];
-  for (const sector of sectorRows) {
+  const changeOf = (ticker: string): number | null => num(priceSnaps.get(ticker)?.changePctDaily ?? null);
+
+  const sectorsData = sectorRows.map((sector) => {
     const sectorCompanies = companyRows.filter((c) => c.sectorId === sector.id);
-    const etfPrice = sector.etfSymbol ? await latestPrice(sector.etfSymbol) : null;
-
     let advancers = 0;
     let decliners = 0;
     for (const company of sectorCompanies) {
-      const p = await latestPrice(company.ticker);
-      const change = num(p?.changePctDaily);
+      const change = changeOf(company.ticker);
       if (change !== null) {
         if (change > 0) {
           advancers += 1;
@@ -54,31 +57,21 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
       }
     }
 
-    const topEvent = (await db
-      .select({
-        headline: marketEvents.headline,
-        eventId: marketEvents.id,
-        score: impactScores.score,
-      })
-      .from(marketEvents)
-      .leftJoin(impactScores, eq(impactScores.eventId, marketEvents.id))
-      .where(eq(marketEvents.sectorId, sector.id))
-      .orderBy(desc(impactScores.score))
-      .limit(1))[0] ?? null;
-
-    sectorsData.push({
+    const topEvent = topEvents.get(sector.id) ?? null;
+    return {
       slug: sector.slug,
       name: sector.name,
       etf_symbol: sector.etfSymbol,
-      change_pct: num(etfPrice?.changePctDaily),
+      change_pct: sector.etfSymbol ? changeOf(sector.etfSymbol) : null,
       advancers,
       decliners,
-      top_event: topEvent ? { headline: topEvent.headline, event_id: topEvent.eventId, impact_score: num(topEvent.score) } : null,
-    });
-  }
+      top_event: topEvent
+        ? { headline: topEvent.headline, event_id: topEvent.eventId, impact_score: num(topEvent.score) }
+        : null,
+    };
+  });
 
-  const macroRows = await db.select().from(macroSnapshots).orderBy(desc(macroSnapshots.ts)).limit(12);
-  const macroLatest = new Map<string, (typeof macroSnapshots.$inferSelect)>();
+  const macroLatest = new Map<string, (typeof macroRows)[number]>();
   for (const m of macroRows) {
     if (!macroLatest.has(m.series)) {
       macroLatest.set(m.series, m);
@@ -109,18 +102,12 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
     ]),
   );
 
-  const vixRows = await db
-    .select()
-    .from(macroSnapshots)
-    .where(eq(macroSnapshots.series, "VIX" as never))
-    .orderBy(desc(macroSnapshots.ts))
-    .limit(20);
   const vixMean = vixRows.length > 0 ? vixRows.reduce((acc, r) => acc + Number(r.value), 0) / vixRows.length : null;
 
   let breadthAdvancers = 0;
   let breadthDecliners = 0;
   for (const company of companyRows) {
-    const change = num((await latestPrice(company.ticker))?.changePctDaily);
+    const change = changeOf(company.ticker);
     if (change !== null) {
       if (change > 0) {
         breadthAdvancers += 1;
@@ -135,10 +122,10 @@ export async function getMarketContext(): Promise<Record<string, unknown>> {
     as_of: now.toISOString(),
     session: sessionFor(now),
     indices: [
-      { symbol: "SPY", change_pct: num(spy?.changePctDaily), price: num(spy?.price) },
-      { symbol: "QQQ", change_pct: num(qqq?.changePctDaily), price: num(qqq?.price) },
-      { symbol: "SOXX", change_pct: num(soxx?.changePctDaily), price: num(soxx?.price) },
-      { symbol: "VIX", value: num(vix[0]?.value), change: vixMacro?.change ?? num(vix[0]?.change) },
+      { symbol: "SPY", change_pct: changeOf("SPY"), price: num(priceSnaps.get("SPY")?.price ?? null) },
+      { symbol: "QQQ", change_pct: changeOf("QQQ"), price: num(priceSnaps.get("QQQ")?.price ?? null) },
+      { symbol: "SOXX", change_pct: changeOf("SOXX"), price: num(priceSnaps.get("SOXX")?.price ?? null) },
+      { symbol: "VIX", value: num(vixRows[0]?.value ?? null), change: vixMacro?.change ?? num(vixRows[0]?.change ?? null) },
     ],
     sectors: sectorsData,
     macro,

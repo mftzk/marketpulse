@@ -11,8 +11,13 @@ import type { HealthView, MarketContextView } from "@/lib/view-types";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+// The SSR shell only needs the top of the feed; the client `Refresher` polls
+// `/api/events?limit=30` for the full live list, so rendering 15 here keeps the
+// server render cheap without changing what the user eventually sees.
+const SSR_EVENT_LIMIT = 15;
+
 const EMPTY_PAGE: ListPage = {
-  limit: 30,
+  limit: SSR_EVENT_LIMIT,
   offset: 0,
   next_offset: null,
   has_more: false,
@@ -22,7 +27,7 @@ const EMPTY_PAGE: ListPage = {
 export default async function DashboardPage() {
   const events = await safeCall(
     "dashboard.events",
-    () => listEvents({ limit: 30, offset: 0, sort: "impact_desc" }),
+    () => listEvents({ limit: SSR_EVENT_LIMIT, offset: 0, sort: "impact_desc" }),
     { data: [], page: EMPTY_PAGE },
   );
 
