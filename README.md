@@ -68,7 +68,11 @@ npm run db:release                # run migrations, then seed demo data
 npm run dev                       # http://localhost:3000
 ```
 
-Sign in with the seeded demo account: **`trader@marketpulse.dev` / `marketpulse-demo`**.
+Sign in with the account created by the seed. Set `ADMIN_EMAIL` (default
+`zakaria@nrapken.dev`), `ADMIN_DISPLAY_NAME` and **`ADMIN_PASSWORD`** in `.env`
+before `npm run db:release`; the seed creates or refreshes that single account.
+Without `ADMIN_PASSWORD` the seed still writes the market dataset but creates no
+account.
 
 Useful scripts:
 
@@ -94,14 +98,16 @@ server. `docker compose config -q` validates the compose file.
 ### Smoke harness
 
 ```bash
-BASE_URL=http://127.0.0.1:3000 npm run smoke
-# optional overrides: SMOKE_EMAIL / SMOKE_PASSWORD
+BASE_URL=http://127.0.0.1:3000 SMOKE_PASSWORD=... npm run smoke
+# SMOKE_EMAIL  (default: ADMIN_EMAIL, then zakaria@nrapken.dev)
+# SMOKE_PASSWORD (no default; required)
 ```
 
-The harness signs in first (defaults to the demo account), then runs its checks with the session
-cookie. Prints a `PASS/FAIL` table, verifies unauthenticated API calls get `401` while
-`/api/health` stays public, scans every event string for advice language, checks all 16 event-detail
-sections, and exits non-zero on any failure.
+The harness signs in first with the admin account, then runs its checks with the session cookie.
+Without `SMOKE_PASSWORD` it prints `smoke: SMOKE_PASSWORD not set — cannot sign in` and exits
+non-zero rather than measuring `401`s. Prints a `PASS/FAIL` table, verifies unauthenticated API
+calls get `401` while `/api/health` stays public, scans every event string for advice language,
+checks all 16 event-detail sections, and exits non-zero on any failure.
 
 ---
 
@@ -145,6 +151,9 @@ JSON `401 unauthorized`, pages are redirected to `/login?next=<path>`.
 |---|---|
 | `AUTH_ENABLED` | `1` (default) enforces the gate; `0` disables it (local-dev escape hatch) |
 | `SESSION_SECRET` | HMAC signing key — **required and >= 32 chars** when auth is on |
+| `ADMIN_EMAIL` | Email of the single seeded owner account (default `zakaria@nrapken.dev`) |
+| `ADMIN_DISPLAY_NAME` | Display name of that account (default `Zakaria`) |
+| `ADMIN_PASSWORD` | Password to create/refresh that account — **no default** |
 
 Generate a secret:
 
@@ -152,8 +161,29 @@ Generate a secret:
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-**Adding a user.** There is intentionally no signup endpoint. Hash a password
-with the same module and insert the row:
+**The admin account.** The seed owns exactly one account. It is created/refreshed
+from `ADMIN_EMAIL` / `ADMIN_DISPLAY_NAME` / `ADMIN_PASSWORD` (the default watchlist
+and alert rules belong to it). `ADMIN_PASSWORD` is required to create the account:
+there is no default and no generated password, and the plaintext is never logged.
+When it is unset the seed prints
+`seed: ADMIN_PASSWORD not set — skipping account creation` and still seeds the
+market dataset, so local/CI runs need no secret.
+
+**Rotate the password** by changing `ADMIN_PASSWORD` and re-running the seed;
+it re-hashes and updates `password_hash` in place, leaving watchlists and alerts
+untouched:
+
+```bash
+ADMIN_PASSWORD='new-secret' npm run db:seed
+```
+
+The seed is idempotent. On an existing deployment that still has the old demo
+account (`trader@marketpulse.dev` / `demo@marketpulse.dev`), it first transfers
+that account's watchlists and alert rules to the admin and then removes the
+legacy row — the demo watchlist survives under the admin.
+
+**Adding another user manually.** There is intentionally no signup endpoint. Hash
+a password with the same module and insert the row:
 
 ```bash
 node -e "import('./lib/auth/password.mjs').then((m) => console.log(m.hashPassword('your-password')))"
@@ -281,6 +311,9 @@ helpers, and API DTO contracts. No network or database is touched.
    PIPELINE_TICK_SECONDS=30
    AUTH_ENABLED=1
    SESSION_SECRET=<at least 32 random characters>
+   ADMIN_EMAIL=zakaria@nrapken.dev
+   ADMIN_DISPLAY_NAME=Zakaria
+   ADMIN_PASSWORD=<the owner's password>
    # REDIS_URL optional
    ```
 4. Optional `REDIS_URL` for a shared cache. Again: the cache is never a source of truth, so the app

@@ -28,10 +28,7 @@ export const COPY = {
     password: "Password",
     signIn: "Sign in",
     signOut: "Sign out",
-    errorInvalid: "Invalid email or password",
     errorGeneric: "Sign in failed",
-    demoHint: "Demo access",
-    demoCredentials: "trader@marketpulse.dev / marketpulse-demo",
   },
 
   common: {

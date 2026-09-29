@@ -6,6 +6,8 @@
 
 import { createHash } from "node:crypto";
 
+import { DEFAULT_ADMIN_DISPLAY_NAME, DEFAULT_ADMIN_EMAIL } from "./admin-account.mjs";
+
 // ---------------------------------------------------------------------------
 // Deterministic PRNG (mulberry32) + helpers
 // ---------------------------------------------------------------------------
@@ -830,18 +832,23 @@ const RECENT_PLAN = [
 // Dataset builder
 // ---------------------------------------------------------------------------
 
-export function buildDataset({ now }) {
+export function buildDataset({ now, admin } = {}) {
   const nowDate = now instanceof Date ? now : new Date(now);
   const rng = mulberry32(SEED);
   const days = tradingDays(nowDate, 5);
 
   // --- reference data ---
+  // The seeded owner comes from the environment; the seeder passes the resolved
+  // account in. When called without one (tests, `backfillArticles`) a neutral
+  // placeholder is used — it only supplies the owning id for watchlists/alerts.
+  const adminEmail = admin?.email ?? DEFAULT_ADMIN_EMAIL;
+  const adminDisplayName = admin?.displayName ?? DEFAULT_ADMIN_DISPLAY_NAME;
   const users = [
     {
       id: uuidFromRng(rng),
-      email: "trader@marketpulse.dev",
-      displayName: "Demo Trader",
-      isDemo: true,
+      email: adminEmail,
+      displayName: adminDisplayName,
+      isDemo: false,
       riskProfile: "active",
       prefs: {},
     },

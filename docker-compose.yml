@@ -45,6 +45,12 @@ services:
       LOG_LEVEL: info
       AUTH_ENABLED: "1"
       SESSION_SECRET: dev-only-session-secret-change-me-32chars
+      # Seeded admin account — supplied from the shell or a local .env file.
+      # ADMIN_PASSWORD is intentionally not defaulted here; without it the seed
+      # writes only the market dataset (see README → Authentication).
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_DISPLAY_NAME: ${ADMIN_DISPLAY_NAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
     ports:
       - "3000:3000"
     healthcheck:

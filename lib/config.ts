@@ -94,6 +94,11 @@ export interface Config {
   sessionSecret: string | null;
   /** Human-readable reason auth is misconfigured, or `null` when valid. */
   authConfigError: string | null;
+  /** Single seeded owner account (reads resolve the owning user by this email). */
+  adminEmail: string;
+  adminDisplayName: string;
+  /** Plaintext admin password; only the seeder consumes it, never a read path. */
+  adminPassword: string | null;
   alertWebhookUrl: string | null;
   alertTelegramBotToken: string | null;
   alertTelegramChatId: string | null;
@@ -145,6 +150,9 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     authEnabled,
     sessionSecret,
     authConfigError,
+    adminEmail: (nonEmpty(env.ADMIN_EMAIL) ?? "zakaria@nrapken.dev").toLowerCase(),
+    adminDisplayName: nonEmpty(env.ADMIN_DISPLAY_NAME) ?? "Zakaria",
+    adminPassword: nonEmpty(env.ADMIN_PASSWORD),
     alertWebhookUrl: nonEmpty(env.ALERT_WEBHOOK_URL),
     alertTelegramBotToken: nonEmpty(env.ALERT_TELEGRAM_BOT_TOKEN),
     alertTelegramChatId: nonEmpty(env.ALERT_TELEGRAM_CHAT_ID),

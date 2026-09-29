@@ -17,7 +17,7 @@ function safeNext(value: string | null): string {
 
 function LoginForm() {
   const params = useSearchParams();
-  const [email, setEmail] = useState("trader@marketpulse.dev");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -97,11 +97,6 @@ function LoginForm() {
             {busy ? COPY.common.loading : COPY.auth.signIn}
           </button>
         </form>
-      </div>
-
-      <div className="border border-hairline bg-panel-alt p-3">
-        <p className="text-[10px] uppercase tracking-[0.14em] text-muted">{COPY.auth.demoHint}</p>
-        <p className="mt-1 font-mono text-[11px] text-ink">{COPY.auth.demoCredentials}</p>
       </div>
     </div>
   );

@@ -13,8 +13,14 @@ const BASE_URL = (process.env.BASE_URL || process.argv[2] || "http://127.0.0.1:3
   /\/$/,
   "",
 );
-const SMOKE_EMAIL = process.env.SMOKE_EMAIL || "trader@marketpulse.dev";
-const SMOKE_PASSWORD = process.env.SMOKE_PASSWORD || "marketpulse-demo";
+const SMOKE_EMAIL =
+  process.env.SMOKE_EMAIL || process.env.ADMIN_EMAIL || "zakaria@nrapken.dev";
+const SMOKE_PASSWORD = process.env.SMOKE_PASSWORD || "";
+
+if (!SMOKE_PASSWORD) {
+  console.error("smoke: SMOKE_PASSWORD not set — cannot sign in");
+  process.exit(1);
+}
 
 const NO_ADVICE = /\b(buy|sell|recommend(ation)?s?|target price|take profit|enter at)\b/i;
 
@@ -100,7 +106,7 @@ const DETAIL_SECTIONS = [
   "intraday",
 ];
 
-await check("POST /api/auth/login (demo account)", async () => {
+await check("POST /api/auth/login (admin account)", async () => {
   const response = await fetch(`${BASE_URL}/api/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },

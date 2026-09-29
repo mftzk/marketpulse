@@ -1,6 +1,7 @@
 import postgres from "postgres";
 
 import { hashPassword } from "../lib/auth/password.mjs";
+import { LEGACY_DEMO_EMAILS, resolveAdminAccount } from "./admin-account.mjs";
 
 import {
   BENCHMARK_TICKERS,
@@ -10,10 +11,6 @@ import {
   buildDataset,
 } from "./demo-data.mjs";
 
-const DEMO_EMAIL = "trader@marketpulse.dev";
-const LEGACY_DEMO_EMAIL = "demo@marketpulse.dev";
-const DEMO_DISPLAY_NAME = "Demo Trader";
-const DEMO_PASSWORD = "marketpulse-demo";
 const DEMO_TICKERS = COMPANIES.map((c) => c.ticker);
 const DEMO_SECTOR_SLUGS = SECTORS.map((s) => s.slug);
 const DEMO_SOURCE_SLUGS = NEWS_SOURCES.map((s) => s.slug);
@@ -65,11 +62,16 @@ async function insert(sql, table, rows, pairs, jsonbCols = []) {
   await sql`insert into ${sql(table)} ${sql(prepared, ...columns)}`;
 }
 
-async function deleteDemoData(sql) {
-  // Watchlists and alert rules cascade from the demo user; events cascade their
-  // child rows. Delete in dependency-safe order.
-  await sql`DELETE FROM alert_rules WHERE user_id IN (SELECT id FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL}))`;
-  await sql`DELETE FROM watchlists WHERE user_id IN (SELECT id FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL}))`;
+async function deleteDemoData(sql, adminId) {
+  // Watchlists and alert rules are owned by users; events cascade their child
+  // rows. Delete in dependency-safe order. The admin user itself is preserved
+  // (re-seeded idempotently) so its id — and the account — stay stable.
+  if (adminId) {
+    await sql`DELETE FROM alert_rules WHERE user_id = ${adminId}`;
+    await sql`DELETE FROM watchlists WHERE user_id = ${adminId}`;
+  }
+  await sql`DELETE FROM alert_rules WHERE user_id IN (SELECT id FROM users WHERE lower(email) = ANY(${LEGACY_DEMO_EMAILS}))`;
+  await sql`DELETE FROM watchlists WHERE user_id IN (SELECT id FROM users WHERE lower(email) = ANY(${LEGACY_DEMO_EMAILS}))`;
   await sql`DELETE FROM market_events WHERE ticker = ANY(${DEMO_TICKERS})`;
   await sql`DELETE FROM earnings_result WHERE ticker = ANY(${DEMO_TICKERS})`;
   await sql`DELETE FROM fundamental_expectations WHERE ticker = ANY(${DEMO_TICKERS})`;
@@ -81,32 +83,137 @@ async function deleteDemoData(sql) {
   await sql`DELETE FROM companies WHERE ticker = ANY(${DEMO_TICKERS})`;
   await sql`DELETE FROM sectors WHERE slug = ANY(${DEMO_SECTOR_SLUGS})`;
   await sql`DELETE FROM news_sources WHERE slug = ANY(${DEMO_SOURCE_SLUGS})`;
-  await sql`DELETE FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL})`;
+  await sql`DELETE FROM users WHERE lower(email) = ANY(${LEGACY_DEMO_EMAILS})`;
+}
+
+async function seedDataPresent(sql) {
+  const rows = await sql`SELECT 1 FROM companies WHERE ticker = ANY(${DEMO_TICKERS}) LIMIT 1`;
+  return rows.length > 0;
 }
 
 /**
- * Updates (or migrates) the single demo account's credential without touching
- * any of its watchlists/alerts. Also renames a legacy `demo@marketpulse.dev`
- * row in place so existing deployments keep their data.
+ * Moves watchlists / alert rules owned by legacy demo accounts onto the admin
+ * account, then removes those legacy users. Idempotent: a no-op when no legacy
+ * account exists.
  */
-async function upsertDemoCredentials(sql) {
-  await sql`
-    UPDATE users SET email = ${DEMO_EMAIL}, updated_at = now()
-    WHERE email = ${LEGACY_DEMO_EMAIL}
-      AND NOT EXISTS (SELECT 1 FROM users WHERE email = ${DEMO_EMAIL})
+async function migrateLegacyUserData(sql, adminId, adminEmail) {
+  const legacy = await sql`
+    SELECT id, email FROM users
+    WHERE lower(email) = ANY(${LEGACY_DEMO_EMAILS}) AND id <> ${adminId}
   `;
-  await sql`
-    UPDATE users
-    SET password_hash = ${hashPassword(DEMO_PASSWORD)},
-        display_name = ${DEMO_DISPLAY_NAME},
-        is_demo = true,
-        updated_at = now()
-    WHERE email = ${DEMO_EMAIL}
-  `;
+  if (legacy.length === 0) {
+    return;
+  }
+
+  let watchlists = 0;
+  let alertRules = 0;
+  const emails = [];
+  for (const row of legacy) {
+    const movedLists =
+      await sql`UPDATE watchlists SET user_id = ${adminId}, updated_at = now() WHERE user_id = ${row.id} RETURNING id`;
+    const movedRules =
+      await sql`UPDATE alert_rules SET user_id = ${adminId}, updated_at = now() WHERE user_id = ${row.id} RETURNING id`;
+    watchlists += movedLists.length;
+    alertRules += movedRules.length;
+    emails.push(row.email);
+    await sql`DELETE FROM users WHERE id = ${row.id}`;
+  }
+
+  console.log(
+    `seed: migrated ${watchlists} watchlist${watchlists === 1 ? "" : "s"}, ` +
+      `${alertRules} alert rule${alertRules === 1 ? "" : "s"} from ${emails.join(", ")} → ` +
+      `${adminEmail}; removed legacy demo account`,
+  );
 }
 
-function printDemoCredentials() {
-  console.log(`seed: demo login — ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
+/**
+ * Creates or refreshes the single admin account from the environment. A
+ * password is required to create the account; without one, seeding continues
+ * with only the market dataset and a warning. The password is never logged.
+ */
+async function ensureAdminAccount(sql, admin) {
+  const existing = await sql`SELECT id FROM users WHERE lower(email) = ${admin.email} LIMIT 1`;
+  let adminId = existing[0]?.id ?? null;
+
+  if (admin.canCreate) {
+    const passwordHash = hashPassword(admin.password);
+    if (adminId) {
+      await sql`
+        UPDATE users
+        SET password_hash = ${passwordHash}, display_name = ${admin.displayName},
+            is_demo = false, updated_at = now()
+        WHERE id = ${adminId}
+      `;
+    } else {
+      const inserted = await sql`
+        INSERT INTO users (email, display_name, is_demo, risk_profile, prefs, password_hash)
+        VALUES (${admin.email}, ${admin.displayName}, false, 'active', ${sql.json({})}, ${passwordHash})
+        RETURNING id
+      `;
+      adminId = inserted[0].id;
+    }
+  } else {
+    console.warn("seed: ADMIN_PASSWORD not set — skipping account creation");
+  }
+
+  if (adminId) {
+    await migrateLegacyUserData(sql, adminId, admin.email);
+  }
+  return adminId;
+}
+
+/**
+ * Ensures the admin owns the default watchlist and alert rules. Idempotent, so
+ * it is safe on an existing deployment (the migrated demo watchlist counts as
+ * present).
+ */
+async function ensureDefaultUserData(sql, adminId, admin) {
+  const lists = await sql`SELECT id FROM watchlists WHERE user_id = ${adminId} LIMIT 1`;
+  const rules = await sql`SELECT id FROM alert_rules WHERE user_id = ${adminId} LIMIT 1`;
+  if (lists.length > 0 && rules.length > 0) {
+    return;
+  }
+
+  const dataset = buildDataset({ now: new Date(), admin });
+  for (const list of dataset.watchlists) {
+    list.userId = adminId;
+  }
+  for (const rule of dataset.alertRules) {
+    rule.userId = adminId;
+  }
+
+  await sql.begin(async (tx) => {
+    if (lists.length === 0) {
+      await insert(tx, "watchlists", dataset.watchlists, [
+        ["id", "id"],
+        ["user_id", "userId"],
+        ["name", "name"],
+        ["description", "description"],
+        ["is_default", "isDefault"],
+      ]);
+      await insert(tx, "watchlist_stocks", dataset.watchlistStocks, [
+        ["id", "id"],
+        ["watchlist_id", "watchlistId"],
+        ["ticker", "ticker"],
+        ["note", "note"],
+        ["added_at", "addedAt"],
+      ]);
+    }
+    if (rules.length === 0) {
+      await insert(tx, "alert_rules", dataset.alertRules, [
+        ["id", "id"],
+        ["user_id", "userId"],
+        ["name", "name"],
+        ["description", "description"],
+        ["conditions", "conditions"],
+        ["channels", "channels"],
+        ["enabled", "enabled"],
+        ["cooldown_minutes", "cooldownMinutes"],
+        ["match_count", "matchCount"],
+        ["last_triggered_at", "lastTriggeredAt"],
+      ], ["conditions", "channels"]);
+    }
+  });
 }
 
 async function run() {
@@ -114,40 +221,33 @@ async function run() {
   const sql = postgres(url, { max: 1 });
 
   try {
-    const existing = await sql`SELECT id FROM users WHERE email IN (${DEMO_EMAIL}, ${LEGACY_DEMO_EMAIL})`;
-    if (existing.length > 0 && !isForce()) {
-      await sql.begin(async (tx) => {
-        await upsertDemoCredentials(tx);
-      });
+    const admin = resolveAdminAccount(process.env);
+    const adminId = await ensureAdminAccount(sql, admin);
+
+    if (!isForce() && (await seedDataPresent(sql))) {
+      if (adminId) {
+        await ensureDefaultUserData(sql, adminId, admin);
+      }
       console.log("Demo data already present.");
-      printDemoCredentials();
       return;
     }
 
-    const dataset = buildDataset({ now: new Date() });
-    const passwordHash = hashPassword(DEMO_PASSWORD);
-    const demoUsers = dataset.users.map((user) => ({
-      ...user,
-      displayName: DEMO_DISPLAY_NAME,
-      passwordHash,
-      lastLoginAt: null,
-    }));
+    const dataset = buildDataset({ now: new Date(), admin });
+    if (adminId) {
+      for (const list of dataset.watchlists) {
+        list.userId = adminId;
+      }
+      for (const rule of dataset.alertRules) {
+        rule.userId = adminId;
+      }
+    }
 
     await sql.begin(async (tx) => {
       if (isForce()) {
-        await deleteDemoData(tx);
+        await deleteDemoData(tx, adminId);
       }
 
-      await insert(tx, "users", demoUsers, [
-        ["id", "id"],
-        ["email", "email"],
-        ["display_name", "displayName"],
-        ["is_demo", "isDemo"],
-        ["risk_profile", "riskProfile"],
-        ["prefs", "prefs"],
-        ["password_hash", "passwordHash"],
-        ["last_login_at", "lastLoginAt"],
-      ], ["prefs"]);
+      // The admin user is created/refreshed by ensureAdminAccount above.
 
       await insert(tx, "sectors", dataset.sectors, [
         ["id", "id"],
@@ -336,38 +436,42 @@ async function run() {
         ["conditions", "conditions"],
       ], ["conditions"]);
 
-      await insert(tx, "watchlists", dataset.watchlists, [
-        ["id", "id"],
-        ["user_id", "userId"],
-        ["name", "name"],
-        ["description", "description"],
-        ["is_default", "isDefault"],
-      ]);
+      // Watchlists and alert rules are owned by the admin account and are only
+      // written when that account exists (i.e. ADMIN_PASSWORD was provided).
+      if (adminId) {
+        await insert(tx, "watchlists", dataset.watchlists, [
+          ["id", "id"],
+          ["user_id", "userId"],
+          ["name", "name"],
+          ["description", "description"],
+          ["is_default", "isDefault"],
+        ]);
 
-      await insert(tx, "watchlist_stocks", dataset.watchlistStocks, [
-        ["id", "id"],
-        ["watchlist_id", "watchlistId"],
-        ["ticker", "ticker"],
-        ["note", "note"],
-        ["added_at", "addedAt"],
-      ]);
+        await insert(tx, "watchlist_stocks", dataset.watchlistStocks, [
+          ["id", "id"],
+          ["watchlist_id", "watchlistId"],
+          ["ticker", "ticker"],
+          ["note", "note"],
+          ["added_at", "addedAt"],
+        ]);
 
-      await insert(tx, "alert_rules", dataset.alertRules, [
-        ["id", "id"],
-        ["user_id", "userId"],
-        ["name", "name"],
-        ["description", "description"],
-        ["conditions", "conditions"],
-        ["channels", "channels"],
-        ["enabled", "enabled"],
-        ["cooldown_minutes", "cooldownMinutes"],
-        ["match_count", "matchCount"],
-        ["last_triggered_at", "lastTriggeredAt"],
-      ], ["conditions", "channels"]);
+        await insert(tx, "alert_rules", dataset.alertRules, [
+          ["id", "id"],
+          ["user_id", "userId"],
+          ["name", "name"],
+          ["description", "description"],
+          ["conditions", "conditions"],
+          ["channels", "channels"],
+          ["enabled", "enabled"],
+          ["cooldown_minutes", "cooldownMinutes"],
+          ["match_count", "matchCount"],
+          ["last_triggered_at", "lastTriggeredAt"],
+        ], ["conditions", "channels"]);
+      }
     });
 
     const counts = {
-      users: dataset.users.length,
+      users: adminId ? dataset.users.length : 0,
       sectors: dataset.sectors.length,
       companies: dataset.companies.length,
       stocks: dataset.stocks.length,
@@ -382,16 +486,18 @@ async function run() {
       priceSnapshots: dataset.priceSnapshots.length,
       volumeSnapshots: dataset.volumeSnapshots.length,
       technicalSnapshots: dataset.technicalSnapshots.length,
-      watchlists: dataset.watchlists.length,
-      watchlistStocks: dataset.watchlistStocks.length,
-      alertRules: dataset.alertRules.length,
+      watchlists: adminId ? dataset.watchlists.length : 0,
+      watchlistStocks: adminId ? dataset.watchlistStocks.length : 0,
+      alertRules: adminId ? dataset.alertRules.length : 0,
     };
 
     console.log("seed: demo data written");
     for (const [key, value] of Object.entries(counts)) {
       console.log(`  ${key}: ${value}`);
     }
-    printDemoCredentials();
+    if (!adminId) {
+      console.log("seed: no account created (set ADMIN_PASSWORD to create the admin account)");
+    }
   } finally {
     await sql.end();
   }

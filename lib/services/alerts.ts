@@ -1,15 +1,14 @@
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, inArray, sql } from "drizzle-orm";
 
+import { config } from "@/lib/config";
 import type { AlertEventDTO, AlertRuleDTO } from "@/lib/core/detail";
 import { getDb } from "@/lib/db/client";
 import { alertEvents, alertRules, users } from "@/lib/db/schema";
 import { toIso } from "@/lib/services/shared";
 
-const DEMO_EMAIL = "trader@marketpulse.dev";
-
-async function getDemoUserId(): Promise<string> {
+async function getAdminUserId(): Promise<string> {
   const db = getDb();
-  const rows = await db.select({ id: users.id }).from(users).where(eq(users.email, DEMO_EMAIL)).limit(1);
+  const rows = await db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = ${config.adminEmail}`).limit(1);
   return rows[0]?.id ?? "";
 }
 
@@ -45,7 +44,7 @@ export interface AlertUpdateInput {
 
 export async function listAlerts(): Promise<{ rules: AlertRuleDTO[]; events: AlertEventDTO[] }> {
   const db = getDb();
-  const userId = await getDemoUserId();
+  const userId = await getAdminUserId();
 
   const rules = await db.select().from(alertRules).where(eq(alertRules.userId, userId)).orderBy(desc(alertRules.createdAt));
   const ruleIds = rules.map((r) => r.id);
@@ -78,7 +77,7 @@ export async function listAlerts(): Promise<{ rules: AlertRuleDTO[]; events: Ale
 
 export async function createAlert(input: AlertCreateInput): Promise<AlertRuleDTO> {
   const db = getDb();
-  const userId = await getDemoUserId();
+  const userId = await getAdminUserId();
   const inserted = await db
     .insert(alertRules)
     .values({

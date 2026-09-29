@@ -1,5 +1,6 @@
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
+import { config } from "@/lib/config";
 import type { WatchlistDTO, WatchlistStockDTO } from "@/lib/core/detail";
 import { AppError } from "@/lib/errors";
 import { getDb } from "@/lib/db/client";
@@ -8,14 +9,12 @@ import { latestPriceSnapshots, latestVolumeSnapshots } from "@/lib/db/queries/ma
 import { companies, users, watchlistStocks, watchlists } from "@/lib/db/schema";
 import { num } from "@/lib/services/shared";
 
-const DEMO_EMAIL = "trader@marketpulse.dev";
-
-async function getDemoUserId(): Promise<string> {
+async function getAdminUserId(): Promise<string> {
   const db = getDb();
-  const rows = await db.select({ id: users.id }).from(users).where(eq(users.email, DEMO_EMAIL)).limit(1);
+  const rows = await db.select({ id: users.id }).from(users).where(sql`lower(${users.email}) = ${config.adminEmail}`).limit(1);
   const user = rows[0];
   if (!user) {
-    throw new AppError("not_found", "No demo user found");
+    throw new AppError("not_found", "No admin user found");
   }
   return user.id;
 }
@@ -86,7 +85,7 @@ function hydrate(
 
 export async function listWatchlists(): Promise<WatchlistDTO[]> {
   const db = getDb();
-  const userId = await getDemoUserId();
+  const userId = await getAdminUserId();
   const lists = await db.select().from(watchlists).where(eq(watchlists.userId, userId)).orderBy(desc(watchlists.isDefault), asc(watchlists.name));
   if (lists.length === 0) {
     return [];
@@ -120,7 +119,7 @@ export async function listWatchlists(): Promise<WatchlistDTO[]> {
 
 export async function createWatchlist(input: { name: string; description?: string }): Promise<WatchlistDTO> {
   const db = getDb();
-  const userId = await getDemoUserId();
+  const userId = await getAdminUserId();
 
   const existing = await db.select().from(watchlists).where(and(eq(watchlists.userId, userId), eq(watchlists.name, input.name)));
   if (existing.length > 0) {

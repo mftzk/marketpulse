@@ -20,8 +20,9 @@ const BASE_URL = (process.env.BASE_URL || process.argv[2] || "http://127.0.0.1:3
 
 const RUNS = 3;
 
-const EMAIL = process.env.SMOKE_EMAIL || "trader@marketpulse.dev";
-const PASSWORD = process.env.SMOKE_PASSWORD || "marketpulse-demo";
+const EMAIL =
+  process.env.SMOKE_EMAIL || process.env.ADMIN_EMAIL || "zakaria@nrapken.dev";
+const PASSWORD = process.env.SMOKE_PASSWORD || "";
 
 /** Session cookie header for the gated endpoints (empty when auth is disabled). */
 let SESSION_HEADER = "";
@@ -100,7 +101,11 @@ async function warmUp(path) {
   }
 }
 
-await signIn();
+if (PASSWORD) {
+  await signIn();
+} else {
+  console.log("bench: SMOKE_PASSWORD not set — measuring anonymously");
+}
 
 console.log(`bench: ${BASE_URL} (median of ${RUNS} runs, after 1 warm-up)\n`);
 
