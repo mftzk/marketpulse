@@ -7,7 +7,13 @@
  * Runs a table of HTTP checks against a running instance, prints PASS/FAIL per
  * line with a summary, and exits non-zero if any check fails. Only `node:*` /
  * globals (fetch) are used.
+ *
+ * The advisory-language guard is imported from the app's lexicon
+ * (`lib/analysis/advice-lexicon.mjs`) so the harness and the write-time
+ * neutraliser are the same code by construction — there is no duplicated regex.
  */
+
+import { findAdviceLanguage } from "../lib/analysis/advice-lexicon.mjs";
 
 const BASE_URL = (process.env.BASE_URL || process.argv[2] || "http://127.0.0.1:3000").replace(
   /\/$/,
@@ -29,8 +35,6 @@ if (!SMOKE_PASSWORD) {
   console.error("smoke: SMOKE_PASSWORD not set — cannot sign in");
   process.exit(1);
 }
-
-const NO_ADVICE = /\b(buy|sell|recommend(ation)?s?|target price|take profit|enter at)\b/i;
 
 const state = { events: [], sessionCookie: "" };
 
@@ -87,9 +91,9 @@ function* walkStrings(value) {
 
 function findAdvice(value) {
   for (const text of walkStrings(value)) {
-    const match = NO_ADVICE.exec(text);
+    const match = findAdviceLanguage(text);
     if (match) {
-      return `${match[0]} in ${JSON.stringify(text).slice(0, 80)}`;
+      return `${match} in ${JSON.stringify(text).slice(0, 80)}`;
     }
   }
   return null;

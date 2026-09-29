@@ -23,6 +23,8 @@ import {
   technicalSnapshots,
 } from "@/lib/db/schema";
 import { bandForScore } from "@/lib/scoring/impact";
+import { neutralizeAdviceLanguage } from "@/lib/analysis/advice-lexicon";
+import { buildEventSummary } from "@/lib/analysis/summary";
 import { surprisePct } from "@/lib/analysis/surprise";
 import {
   computeReactionInputsBatch,
@@ -45,6 +47,28 @@ import {
 
 type MarketEventRow = typeof marketEvents.$inferSelect;
 type TechnicalRow = typeof technicalSnapshots.$inferSelect;
+
+/**
+ * Read-time safety net for `market_events.summary`/`reasoning` (§0, Phase 15).
+ * Rows written before the write-time guard existed (or by an older deploy) are
+ * re-shaped here so an advisory fragment or an off-ticker vendor sentence can
+ * never reach the API. Pure and idempotent; clean, relevant summaries pass
+ * through byte-for-byte.
+ */
+function servedSummary(event: MarketEventRow, companyName?: string | null): string {
+  return buildEventSummary({
+    ticker: event.ticker,
+    eventTypeLabel: EVENT_TYPE_LABELS[event.eventType as EventType],
+    summary: event.summary,
+    affectedTickers: event.affectedTickers ?? [],
+    companyName: companyName ?? null,
+  });
+}
+
+function servedReasoning(event: MarketEventRow): string {
+  const neutral = neutralizeAdviceLanguage(event.reasoning ?? "").trim();
+  return neutral.length > 0 ? neutral : servedSummary(event);
+}
 
 interface EventRow {
   event: MarketEventRow;
@@ -352,7 +376,7 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
       company_name: row.companyName,
       sector: row.sectorSlug,
       headline: event.headline,
-      summary: event.summary ?? "",
+      summary: servedSummary(event, row.companyName),
       event_type: event.eventType as EventType,
       event_type_label: EVENT_TYPE_LABELS[event.eventType as EventType],
       published_at: event.publishedAt?.toISOString() ?? null,
@@ -534,7 +558,7 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
     company_name: row.companyName,
     sector: row.sectorSlug,
     headline: event.headline,
-    summary: event.summary ?? "",
+    summary: servedSummary(event, row.companyName),
     event_type: event.eventType as EventType,
     event_type_label: EVENT_TYPE_LABELS[event.eventType as EventType],
     published_at: event.publishedAt?.toISOString() ?? null,
@@ -663,7 +687,7 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
   const detail: EventDetailDTO = {
     overview: {
       headline: event.headline,
-      summary: event.summary ?? "",
+      summary: servedSummary(event, row.companyName),
       event_type: event.eventType as EventType,
       event_type_label: EVENT_TYPE_LABELS[event.eventType as EventType],
       catalyst_direction: event.catalystDirection,
@@ -677,8 +701,8 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       source: { name: row.sourceName, tier: row.sourceTier, quality_score: num(row.sourceQuality), quality_label: qualityLabel(num(row.sourceQuality)), ingest_provider: row.ingestProvider },
       article_count: event.articleCount ?? 1,
     },
-    what_happened: event.summary ?? event.headline,
-    why_it_matters: event.reasoning ?? event.summary ?? "",
+    what_happened: servedSummary(event, row.companyName),
+    why_it_matters: servedReasoning(event),
     expectation_vs_actual: {
       eps_surprise_pct: epsActual !== null && epsConsensus !== null
         ? surprisePct(epsActual, epsConsensus).surprisePct : null,

@@ -3,6 +3,7 @@ import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { dispatchAlert } from "@/lib/alerts/dispatch";
 import { evaluateRule, type AlertEventView } from "@/lib/alerts/evaluate";
 import type { AlertConditions } from "@/lib/alerts/conditions";
+import { neutralizeAdviceLanguage } from "@/lib/analysis/advice-lexicon";
 import { alertEvents, alertRules, companies, eventTickers, impactScores, marketEvents, sectors } from "@/lib/db/schema";
 import { bandForScore } from "@/lib/scoring/impact";
 import { alertsRefreshDecision, alertsStateHash, rulesFingerprint } from "@/lib/pipeline/incremental";
@@ -221,7 +222,7 @@ export async function evaluateAlerts(ctx: PipelineContext): Promise<JobResult> {
           ruleId: rule.id,
           eventId: event.id,
           title: `${event.ticker ?? "Market"} — ${event.headline}`,
-          body: event.summary ?? event.headline,
+          body: neutralizeAdviceLanguage(event.summary ?? event.headline) || event.headline,
           matched: evaluation.matched,
           channels: (rule.channels ?? []) as string[],
           cooldownMinutes: rule.cooldownMinutes ?? 30,

@@ -5,16 +5,17 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { COPY } from "@/lib/copy";
+import { ADVICE_LANGUAGE_PATTERN, findAdviceLanguage } from "@/lib/analysis/advice-lexicon";
 import { findAdvice } from "@/lib/scoring/language";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /**
- * The exact regex the smoke harness applies to every string returned by the API.
- * Kept in sync with `scripts/smoke.mjs`.
+ * The exact guard the smoke harness applies to every string returned by the API.
+ * It is now imported from the shared lexicon (`advice-lexicon.mjs`) that
+ * `scripts/smoke.mjs` imports too — there is no duplicated regex anywhere.
  */
-const SMOKE_NO_ADVICE =
-  /\b(buy|sell|recommend(ation)?s?|target price|take profit|enter at)\b/i;
+const SMOKE_NO_ADVICE = ADVICE_LANGUAGE_PATTERN;
 
 function collectStrings(value: unknown, out: string[]): string[] {
   if (typeof value === "string") {

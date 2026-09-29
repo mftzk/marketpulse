@@ -2,6 +2,7 @@ import { desc, eq, inArray, sql } from "drizzle-orm";
 
 import { config } from "@/lib/config";
 import { evaluateRule } from "@/lib/alerts/evaluate";
+import { neutralizeAdviceLanguage } from "@/lib/analysis/advice-lexicon";
 import type { AlertConditions } from "@/lib/alerts/conditions";
 import type { AlertEventDTO, AlertRuleDTO } from "@/lib/core/detail";
 import { getDb } from "@/lib/db/client";
@@ -111,8 +112,8 @@ export async function listAlerts(): Promise<{ rules: AlertRuleDTO[]; events: Ale
       event_id: e.eventId,
       triggered_at: toIso(e.triggeredAt),
       matched_conditions: e.matchedConditions ?? [],
-      title: e.title,
-      body: e.body,
+      title: neutralizeAdviceLanguage(e.title ?? "") || e.title,
+      body: neutralizeAdviceLanguage(e.body ?? "") || e.body,
       delivered_channels: e.deliveredChannels ?? [],
       status: e.status,
       material_reason: e.materialReason,

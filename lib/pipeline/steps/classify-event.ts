@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 
-import { classifyArticles, type ClassifiedArticle, type ClassifyInput } from "@/lib/analysis/classify";
+import { classifyArticles, classifyByRules, type ClassifiedArticle, type ClassifyInput } from "@/lib/analysis/classify";
 import { classificationSchema } from "@/lib/analysis/classification-schema";
 import { fiscalPeriodFromText } from "@/lib/analysis/fiscal-period";
 import { llmClient } from "@/lib/analysis/llm-client";
+import { sanitizeReasoningText, sanitizeSummaryText } from "@/lib/analysis/summary";
 import { newsArticles, newsSources } from "@/lib/db/schema";
 import type { PipelineContext } from "@/lib/pipeline/context";
 import type { JobResult } from "@/lib/pipeline/registry";
@@ -105,6 +106,22 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
         continue;
       }
       const c = entry.classification;
+
+      // Advisory-language guard (§0, Phase 15). Real vendor copy carries analyst
+      // rating language ("Buy rating", "price target"); the LLM can echo it into
+      // `summary`/`reasoning`. Neutralise those fields before they are stored or
+      // served, falling back to the deterministic rules text when neutralisation
+      // leaves too little. The strict schema above is unchanged.
+      const rules = classifyByRules({
+        headline: row.headline,
+        body: row.body,
+        tickersRaw: row.tickersRaw ?? [],
+        sourceQuality: row.qualityScore === null ? 0 : Number(row.qualityScore),
+      });
+      const summary = sanitizeSummaryText(c.summary, [rules.summary]);
+      const reasoning = sanitizeReasoningText(c.reasoning, [rules.reasoning]);
+      entry.classification = { ...c, summary, reasoning };
+
       ctx.state.classifications.push({
         articleId: entry.articleId,
         ticker: c.ticker,
@@ -112,7 +129,7 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
         body: row.body,
         eventType: c.event_type,
         headline: row.headline,
-        summary: c.summary,
+        summary,
         sentiment: c.sentiment,
         catalystDirection: c.catalyst_direction,
         companyRelevance: c.company_relevance,
@@ -120,7 +137,7 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
         sourceQuality: row.qualityScore === null ? null : Number(row.qualityScore),
         affectedTickers: c.affected_tickers,
         affectedSectors: c.affected_sectors,
-        reasoning: c.reasoning,
+        reasoning,
         publishedAt: row.publishedAt,
         receivedAt: row.firstReceivedAt,
         dedupeAt: row.publishedAt ?? row.firstReceivedAt,

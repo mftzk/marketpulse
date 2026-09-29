@@ -1,7 +1,10 @@
 import { and, desc, eq, gte, or, sql } from "drizzle-orm";
 
 import { articleFingerprint, clusterEvents, dedupeBucket, headlinesReferToSameEvent, normalizeTokens } from "@/lib/analysis/dedupe";
+import { neutralizeAdviceLanguage } from "@/lib/analysis/advice-lexicon";
+import { buildEventSummary } from "@/lib/analysis/summary";
 import { resolveUniverseTicker, type TickerUniverseEntry } from "@/lib/analysis/ticker-detect";
+import { EVENT_TYPE_LABELS } from "@/lib/core/event-types";
 import { sessionFor } from "@/lib/core/session";
 import { cacheKeys } from "@/lib/cache/keys";
 import { errorMessage, pgConstraintName, pgErrorCode } from "@/lib/db/errors";
@@ -232,7 +235,13 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
         const baseValues = {
           canonicalArticleId: nullIfEmpty(canonicalArticleId),
           headline: keepExistingCanonical ? matchedEvent?.headline ?? cluster.headline : cluster.headline,
-          summary: keepExistingCanonical ? matchedEvent?.summary ?? cluster.summary : cluster.summary,
+          summary: buildEventSummary({
+            ticker,
+            eventTypeLabel: EVENT_TYPE_LABELS[cluster.eventType],
+            summary: keepExistingCanonical ? matchedEvent?.summary ?? cluster.summary : cluster.summary,
+            affectedTickers,
+            companyName: company?.name ?? null,
+          }),
           eventType: cluster.eventType,
           ticker,
           companyId: nullIfEmpty(company?.companyId),
@@ -243,7 +252,7 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
           eventImportance: String(keepExistingCanonical ? matchedEvent?.eventImportance ?? 0 : canonical.eventImportance),
           affectedTickers,
           affectedSectors,
-          reasoning: keepExistingCanonical ? matchedEvent?.reasoning ?? null : canonical.reasoning,
+          reasoning: neutralizeAdviceLanguage(keepExistingCanonical ? matchedEvent?.reasoning ?? "" : canonical.reasoning) || null,
           publishedAt,
           fiscalPeriod: nullIfEmpty(canonical.fiscalPeriod ?? matchedEvent?.fiscalPeriod ?? null),
           firstReceivedAt: matchedEvent && matchedEvent.firstReceivedAt < receivedAt ? matchedEvent.firstReceivedAt : receivedAt,
