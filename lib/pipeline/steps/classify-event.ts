@@ -94,6 +94,7 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
       maxLlmCalls: ctx.config.pipelineMaxLlmCallsPerTick,
       failureStreakLimit: ctx.config.pipelineLlmFailureStreakLimit,
       deadlineAt,
+      maxArticleChars: ctx.config.llmMaxArticleChars,
     });
 
     const classified = [...reusable, ...fresh];
@@ -107,6 +108,8 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
       ctx.state.classifications.push({
         articleId: entry.articleId,
         ticker: c.ticker,
+        rawTickers: row.tickersRaw ?? [],
+        body: row.body,
         eventType: c.event_type,
         headline: row.headline,
         summary: c.summary,

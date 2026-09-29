@@ -15,6 +15,12 @@ export interface FakeDbOptions {
   insertReturning?: unknown[][];
   /** Table objects for each insert, in call order (for assertions). */
   insertTables?: unknown[];
+  /**
+   * Simulates a database constraint rejection: when it returns an Error for an
+   * insert, the chain's `.returning()` rejects with it (used to prove a bad
+   * insert cannot fail the enclosing pipeline step).
+   */
+  insertReturningError?: (table: unknown, values: unknown) => Error | null;
 }
 
 export interface FakeOp {
@@ -97,10 +103,18 @@ export function createFakeDb(options: FakeDbOptions = {}): FakeDb {
       return chain;
     },
     insert: (table: unknown) => {
-      const chain = makeChain(() => insertReturning.shift() ?? []);
+      let lastValues: unknown;
+      const chain = makeChain(() => {
+        const rejection = options.insertReturningError?.(table, lastValues) ?? null;
+        if (rejection) {
+          throw rejection;
+        }
+        return insertReturning.shift() ?? [];
+      });
       ops.push({ op: "insert", table, values: undefined });
       const originalValues = chain.values as (value: unknown) => unknown;
       chain.values = (value: unknown) => {
+        lastValues = value;
         ops[ops.length - 1] = { op: "insert", table, values: value };
         return originalValues(value);
       };

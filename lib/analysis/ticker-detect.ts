@@ -171,3 +171,44 @@ export function detectTickerSymbols(
 ): string[] {
   return detectTickers(text, universe).map((d) => d.ticker);
 }
+
+/**
+ * Resolves the primary ticker of an event against the active universe.
+ *
+ * The article's raw/affected tickers (uppercase, de-duplicated, order
+ * preserved) are tried first: the first one that exists in `universe` wins.
+ * When none of them is in-universe (e.g. a Benzinga article carrying `GOOGL`,
+ * which the app does not track), the text is scanned with `detectTickerSymbols`
+ * so an in-universe symbol mentioned in the headline/body can still be found.
+ *
+ * Returns `null` when the article cannot be mapped to a universe ticker. The
+ * caller decides whether that means "skip the event" (the article named only
+ * out-of-universe symbols) or "ticker-less event" (no symbols at all, e.g. a
+ * macro print).
+ */
+export function resolveUniverseTicker(
+  candidates: ReadonlyArray<string | null | undefined>,
+  text: string,
+  universe: TickerUniverseEntry[],
+): string | null {
+  if (universe.length === 0) {
+    return null;
+  }
+  const available = new Set(universe.map((entry) => entry.ticker.toUpperCase()));
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+    const normalized = candidate.trim().toUpperCase();
+    if (normalized.length === 0 || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    if (available.has(normalized)) {
+      return normalized;
+    }
+  }
+  const detected = detectTickerSymbols(text, universe);
+  return detected.length > 0 ? detected[0] : null;
+}

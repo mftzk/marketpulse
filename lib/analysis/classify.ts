@@ -41,6 +41,12 @@ export interface ClassifyOptions {
   failureStreakLimit?: number;
   /** Absolute epoch-ms after which no new LLM call is started. */
   deadlineAt?: number;
+  /**
+   * Maximum characters of each article body included in the prompt. Real vendor
+   * articles can be thousands of characters long; sending them whole blows the
+   * request timeout. Headlines are always included in full.
+   */
+  maxArticleChars?: number;
 }
 
 export interface ClassifyStats {
@@ -63,10 +69,78 @@ export interface ClassifyRunResult {
 
 const BATCH_SIZE = 10;
 
-function buildPrompt(items: ClassifyInput[]): string {
+/** Default body budget per article in the classification prompt. */
+export const DEFAULT_MAX_ARTICLE_CHARS = 1_200;
+
+/** Cheap char→token estimate (≈4 chars/token) for observability only. */
+export function estimatePromptTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Reduces arbitrary article text to prompt-safe plain text. The provider
+ * adapters already convert HTML to text, but this is a defensive second pass:
+ * a raw HTML body must never reach the model (markup inflates the prompt and
+ * the model cannot reason about it).
+ */
+export function toPromptText(value: string): string {
+  return value
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&(nbsp|#160);/gi, " ")
+    .replace(/&(amp);/gi, "&")
+    .replace(/&(lt|#60);/gi, "<")
+    .replace(/&(gt|#62);/gi, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Truncates `text` to at most `maxChars`, preferring a sentence boundary and
+ * falling back to the last word boundary so a word is never cut in half.
+ */
+export function truncateOnBoundary(text: string, maxChars: number): string {
+  if (!Number.isFinite(maxChars) || maxChars <= 0) {
+    return "";
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+  let slice = text.slice(0, maxChars);
+  // Cut exactly at a word boundary (next char is a space) — keep the slice.
+  if (text.charAt(maxChars) === " ") {
+    return slice.trim();
+  }
+  const sentenceEnd = Math.max(
+    slice.lastIndexOf(". "),
+    slice.lastIndexOf("! "),
+    slice.lastIndexOf("? "),
+  );
+  if (sentenceEnd > maxChars * 0.5) {
+    return slice.slice(0, sentenceEnd + 1).trim();
+  }
+  const wordEnd = slice.lastIndexOf(" ");
+  if (wordEnd > 0) {
+    slice = slice.slice(0, wordEnd);
+  }
+  return slice.trim();
+}
+
+/**
+ * Builds the classification prompt. The headline is always present in full; the
+ * body is reduced to prompt-safe plain text and capped at `maxArticleChars`
+ * (default `DEFAULT_MAX_ARTICLE_CHARS`) so a long vendor article cannot blow
+ * the LLM request timeout.
+ */
+export function buildPrompt(
+  items: ClassifyInput[],
+  maxArticleChars: number = DEFAULT_MAX_ARTICLE_CHARS,
+): string {
   const lines = items
     .map((item, index) => {
-      const body = item.body ? ` body="${item.body}"` : "";
+      const bodyText = item.body ? truncateOnBoundary(toPromptText(item.body), maxArticleChars) : "";
+      const body = bodyText ? ` body="${bodyText}"` : "";
       return `${index}. headline="${item.headline}"${body} tickers=${JSON.stringify(item.tickersRaw)}`;
     })
     .join("\n");
@@ -276,7 +350,13 @@ export async function classifyArticles(
     if (canUseLlm) {
       llmCalls += 1;
       let handled = false;
-      const llmResult = await opts.llm.complete(buildPrompt(chunk));
+      const prompt = buildPrompt(chunk, opts.maxArticleChars);
+      const promptChars = prompt.length;
+      const callStarted = Date.now();
+      const llmResult = await opts.llm.complete(prompt);
+      const latencyMs = Date.now() - callStarted;
+      let outcome = "rules";
+      let failReason: string | null = null;
       if (llmResult.ok) {
         const classifications = parseEnvelope(llmResult.content);
         if (classifications !== null && classifications.length === chunk.length) {
@@ -290,13 +370,29 @@ export async function classifyArticles(
           classified += chunk.length;
           consecutiveFailures = 0;
           handled = true;
+          outcome = "llm";
         } else {
+          failReason = "invalid_output";
           logger.warn("llm_classification_invalid", {
             event: "analysis.classify",
             batchSize: chunk.length,
           });
         }
+      } else {
+        failReason = llmResult.reason;
       }
+
+      // Per-call observability: a future timeout must be diagnosable from the
+      // log line alone (prompt size + latency + why the fallback ran).
+      logger.info("llm_classification_call", {
+        event: "analysis.classify",
+        batch_size: chunk.length,
+        prompt_chars: promptChars,
+        est_tokens: estimatePromptTokens(prompt),
+        latency_ms: latencyMs,
+        outcome,
+        ...(failReason ? { reason: failReason } : {}),
+      });
 
       if (!handled) {
         consecutiveFailures += 1;

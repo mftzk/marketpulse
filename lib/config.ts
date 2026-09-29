@@ -120,6 +120,12 @@ export interface Config {
   pipelineLlmFailureStreakLimit: number;
   /** Hard timeout applied to every LLM request (ms). */
   llmTimeoutMs: number;
+  /**
+   * Maximum characters of each article's body included in the classification
+   * prompt (headline is always included in full). Real vendor articles can run
+   * to thousands of characters; sending them whole blows the request timeout.
+   */
+  llmMaxArticleChars: number;
   /** Hard cap on market rows written per table per tick, across all tickers. */
   pipelineMarketMaxRows: number;
   /** Hard cap on minute bars persisted per ticker per tick (newest slice wins). */
@@ -174,7 +180,8 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   const pipelineStepBudgetMs = parsePositiveInt(nonEmpty(env.PIPELINE_STEP_BUDGET_MS), 20_000);
   const pipelineMaxLlmCallsPerTick = parsePositiveInt(nonEmpty(env.PIPELINE_MAX_LLM_CALLS_PER_TICK), 8);
   const pipelineLlmFailureStreakLimit = parsePositiveInt(nonEmpty(env.PIPELINE_LLM_FAILURE_STREAK_LIMIT), 3);
-  const llmTimeoutMs = parsePositiveInt(nonEmpty(env.LLM_TIMEOUT_MS), 20_000);
+  const llmTimeoutMs = parsePositiveInt(nonEmpty(env.LLM_TIMEOUT_MS), 45_000);
+  const llmMaxArticleChars = parsePositiveInt(nonEmpty(env.LLM_MAX_ARTICLE_CHARS), 1_200);
   const pipelineMarketMaxRows = parsePositiveInt(nonEmpty(env.PIPELINE_MARKET_MAX_ROWS), 2_000);
   const pipelineMarketMaxBarsPerTicker = parsePositiveInt(
     nonEmpty(env.PIPELINE_MARKET_MAX_BARS_PER_TICKER),
@@ -219,6 +226,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     pipelineMaxLlmCallsPerTick,
     pipelineLlmFailureStreakLimit,
     llmTimeoutMs,
+    llmMaxArticleChars,
     pipelineMarketMaxRows,
     pipelineMarketMaxBarsPerTicker,
     pipelineMaxEventsPerTick,

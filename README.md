@@ -241,8 +241,15 @@ Each tick runs nine idempotent steps, recorded in `pipeline_jobs`
 2. `normalize_news` — trim/normalise, resolve source, stamp `published_at`, derive session
 3. `detect_ticker` — cashtag/name/symbol detection against the active universe
 4. `classify_event` — LLM in batches of ≤10 with strict schema validation; falls back to
-   `classifyByRules()` (marked `rules`/`hybrid`)
-5. `deduplicate_event` — cluster into canonical `market_events`
+   `classifyByRules()` (marked `rules`/`hybrid`). The prompt sends the headline in full plus at
+   most `LLM_MAX_ARTICLE_CHARS` characters of the body (default 1200, truncated on a sentence/word
+   boundary, HTML stripped), and each call is logged with prompt chars, estimated tokens and
+   latency so a timeout is diagnosable from logs alone. `LLM_TIMEOUT_MS` defaults to 45 s.
+5. `deduplicate_event` — cluster into canonical `market_events`. The primary ticker is resolved
+   against `stocks WHERE universe = true`: raw/affected tickers are tried first, then headline/body
+   detection. A cluster whose named tickers are all out-of-universe is skipped (counted as
+   `skipped_out_of_universe` and logged once per tick), `affected_tickers` is filtered to the
+   universe, and a rejected insert is logged as `event_insert_rejected` without failing the step.
 6. `fetch_market_data` — snapshots into price/volume/technical/macro tables
 7. `calculate_market_reaction` — reaction windows, RVOL, relative strength
 8. `calculate_impact_score` — deterministic score + components (delete+insert = idempotent)

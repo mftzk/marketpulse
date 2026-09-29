@@ -30,6 +30,10 @@ export interface PipelineState {
   classifications: {
     articleId: string;
     ticker: string | null;
+    /** Raw tickers attached to the article (vendor feed), before universe resolution. */
+    rawTickers: string[];
+    /** Article body — used for the universe fallback detection in dedupe. */
+    body: string | null;
     eventType: string;
     headline: string;
     summary: string | null;
