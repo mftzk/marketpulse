@@ -19,6 +19,8 @@ export interface JobResult {
   status: "succeeded" | "failed" | "skipped";
   durationMs: number;
   processed: number;
+  /** Database rows written by the step, when it tracks them (observability). */
+  rowsWritten?: number;
   error?: string;
   context?: Record<string, unknown>;
 }

@@ -26,6 +26,7 @@ function reportEnvelope(report: RunReport) {
       status: s.status,
       duration_ms: s.durationMs,
       processed: s.processed,
+      rows_written: s.rowsWritten ?? null,
       error: s.error ?? null,
     })),
     events_created: report.eventsCreated,

@@ -10,6 +10,7 @@ import {
   macroLevelFromEtf,
 } from "@/lib/market/macro";
 import { BROAD_BENCHMARKS, SECTOR_ETF_BY_SLUG } from "@/lib/market/relative-strength";
+import { chunkRows, selectBarsAfter } from "@/lib/pipeline/market-series";
 import { earningsResult, fundamentalExpectations, macroSnapshots, marketEvents, priceSnapshots, sectors, stocks, technicalSnapshots, volumeSnapshots } from "@/lib/db/schema";
 import { configuredFeedStatus } from "@/lib/providers";
 import type { Bar, DailyStats } from "@/lib/providers/types";
@@ -20,6 +21,17 @@ import type { JobResult } from "@/lib/pipeline/registry";
  * Step 6: `fetch_market_data` — `MarketDataProvider` snapshots → `price_snapshots`,
  * `volume_snapshots`, `technical_snapshots`, `macro_snapshots` (upsert by
  * `(ticker, ts)`).
+ *
+ * Phase 7 — the step used to rewrite the whole trading day for every ticker on
+ * every tick. On a 0.25 vCPU container that saturated the process, held the tick
+ * lock for minutes and starved every other request. It now:
+ *   1. reads the highest stored `ts` per ticker in ONE batched query and writes
+ *      only the newer bars (delta);
+ *   2. batches the row arrays across tickers and issues chunked multi-row
+ *      upserts instead of one statement per ticker per table;
+ *   3. hard-caps rows per table per tick and bars per ticker;
+ *   4. stops early (cooperatively) when the per-step budget or tick deadline is
+ *      exceeded, so a slow tick releases the advisory lock instead of pinning it.
  *
  * Technical context (SMA20/SMA50/ATR/RSI, prior-day levels, 52-week distance) is
  * derived from the provider's deterministic daily history, while session VWAP is
@@ -64,12 +76,38 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
       ]),
     ];
 
-    // One price/volume row per minute from the session open (or the last 6 h,
-    // whichever is shorter) up to now, using the provider's minute series.
+    // Start of the persisted snapshot window: the current session's regular open
+    // when the market has already opened, otherwise the last six hours.
     const windowStart = snapshotWindowStart(ctx.now);
-    let processed = 0;
+    const stepDeadline = stepDeadlineFor(ctx);
 
-    for (const ticker of tickers) {
+    // ONE batched query for the delta baseline. Tickers with no stored rows have
+    // a null baseline and get their whole window written on this tick.
+    const lastStored = await loadLastStoredTs(ctx, tickers);
+
+    const maxRows = Math.max(1, ctx.config.pipelineMarketMaxRows);
+    const maxBarsPerTicker = Math.max(1, ctx.config.pipelineMarketMaxBarsPerTicker);
+    const provider = ctx.config.marketProvider;
+    const dataStatus = configuredFeedStatus("market");
+
+    const priceRows: (typeof priceSnapshots.$inferInsert)[] = [];
+    const volumeRows: (typeof volumeSnapshots.$inferInsert)[] = [];
+    const technicalRows: (typeof technicalSnapshots.$inferInsert)[] = [];
+    let processed = 0;
+    let truncated = false;
+    let droppedBars = 0;
+    let skippedTickers = 0;
+
+    for (let index = 0; index < tickers.length; index += 1) {
+      // Cooperative cancellation between tickers: the step budget / tick deadline
+      // is checked before each provider round-trip so a slow tick returns early.
+      if (Date.now() >= stepDeadline) {
+        truncated = true;
+        skippedTickers = tickers.length - index;
+        break;
+      }
+
+      const ticker = tickers[index];
       const snapshot = await ctx.providers.market.snapshot(ticker, ctx.now);
       if (!snapshot) {
         continue;
@@ -106,107 +144,67 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
         gapPct,
       });
 
-      await persistMinuteSeries(ctx, ticker, minuteBars, stats, sessionVwap, rvolByTime);
+      // Only bars strictly newer than the last stored minute are written; the
+      // actively-forming minute stays fresh via the next tick. A per-ticker cap
+      // keeps the newest slice and reports the truncation.
+      const delta = selectBarsAfter(minuteBars, lastStored.get(ticker) ?? null, maxBarsPerTicker);
+      if (delta.truncated) {
+        truncated = true;
+        droppedBars += delta.dropped;
+      }
+      let barsToWrite = delta.bars;
 
-      await ctx.db
-        .insert(technicalSnapshots)
-        .values({
-          ticker,
-          ts: snapshot.ts,
-          vwap: sessionVwap === null ? null : String(sessionVwap),
-          sma20: dailyTechnicals.sma20 === null ? null : String(dailyTechnicals.sma20),
-          sma50: dailyTechnicals.sma50 === null ? null : String(dailyTechnicals.sma50),
-          ema9: dailyTechnicals.ema9 === null ? null : String(dailyTechnicals.ema9),
-          atr14: dailyTechnicals.atr14 === null ? null : String(dailyTechnicals.atr14),
-          rsi14: dailyTechnicals.rsi14 === null ? null : String(dailyTechnicals.rsi14),
-          prevDayHigh: String(stats.prevDayHigh),
-          prevDayLow: String(stats.prevDayLow),
-          dayHigh: String(stats.dayHigh),
-          dayLow: String(stats.dayLow),
-          distFrom52wHighPct: distFrom52wHighPct === null ? null : String(distFrom52wHighPct),
-          gapPct: gapPct === null ? null : String(gapPct),
-          conditions,
-        })
-        .onConflictDoNothing();
+      // Hard cap on rows written this tick, summed across all tickers. When the
+      // budget cannot fit the whole delta we keep the newest slice and log it.
+      const remaining = maxRows - priceRows.length;
+      if (barsToWrite.length > remaining) {
+        const drop = barsToWrite.length - Math.max(0, remaining);
+        barsToWrite = remaining <= 0 ? [] : barsToWrite.slice(barsToWrite.length - remaining);
+        truncated = true;
+        droppedBars += drop;
+      }
+
+      const built = buildSnapshotRows(ticker, barsToWrite, stats, sessionVwap, rvolByTime, provider, dataStatus);
+      priceRows.push(...built.priceRows);
+      volumeRows.push(...built.volumeRows);
+
+      technicalRows.push({
+        ticker,
+        ts: snapshot.ts,
+        vwap: sessionVwap === null ? null : String(sessionVwap),
+        sma20: dailyTechnicals.sma20 === null ? null : String(dailyTechnicals.sma20),
+        sma50: dailyTechnicals.sma50 === null ? null : String(dailyTechnicals.sma50),
+        ema9: dailyTechnicals.ema9 === null ? null : String(dailyTechnicals.ema9),
+        atr14: dailyTechnicals.atr14 === null ? null : String(dailyTechnicals.atr14),
+        rsi14: dailyTechnicals.rsi14 === null ? null : String(dailyTechnicals.rsi14),
+        prevDayHigh: String(stats.prevDayHigh),
+        prevDayLow: String(stats.prevDayLow),
+        dayHigh: String(stats.dayHigh),
+        dayLow: String(stats.dayLow),
+        distFrom52wHighPct: distFrom52wHighPct === null ? null : String(distFrom52wHighPct),
+        gapPct: gapPct === null ? null : String(gapPct),
+        conditions,
+      });
 
       processed += 1;
+
+      if (priceRows.length >= maxRows) {
+        truncated = true;
+        skippedTickers = Math.max(0, tickers.length - (index + 1));
+        break;
+      }
+    }
+
+    // One chunked multi-row upsert per table (never one statement per ticker).
+    await upsertMarketRows(ctx, priceRows, volumeRows);
+    for (const chunk of chunkRows(technicalRows)) {
+      await ctx.db.insert(technicalSnapshots).values(chunk).onConflictDoNothing();
     }
 
     // Fundamentals are pulled through their own provider contract and retain
     // explicit provider/status metadata. An unconfigured adapter returns no
     // rows; it never substitutes demo values for a requested live feed.
-    for (const { ticker } of universe) {
-      const [expectations, earnings] = await Promise.all([
-        ctx.providers.fundamental.expectations(ticker),
-        ctx.providers.fundamental.earnings(ticker),
-      ]);
-      for (const item of expectations) {
-        await ctx.db.insert(fundamentalExpectations).values({
-          ticker: item.ticker,
-          fiscalPeriod: item.fiscalPeriod,
-          metric: item.metric,
-          consensus: String(item.consensus),
-          unit: item.unit,
-          asOf: item.asOf,
-          source: item.source,
-          currency: item.currency ?? null,
-          epsType: item.epsType ?? null,
-          provider: ctx.config.fundamentalProvider,
-          dataStatus: configuredFeedStatus("fundamental"),
-          updatedAt: ctx.now,
-        }).onConflictDoUpdate({
-          target: [fundamentalExpectations.ticker, fundamentalExpectations.fiscalPeriod, fundamentalExpectations.metric],
-          set: {
-            consensus: sql`excluded.consensus`, unit: sql`excluded.unit`, asOf: sql`excluded.as_of`,
-            source: sql`excluded.source`, currency: sql`excluded.currency`, epsType: sql`excluded.eps_type`,
-            provider: sql`excluded.provider`, dataStatus: sql`excluded.data_status`, updatedAt: ctx.now,
-          },
-        });
-      }
-      for (const item of earnings) {
-        const matchingEvent = await ctx.db.select({ id: marketEvents.id }).from(marketEvents).where(sql`
-          ${marketEvents.ticker} = ${ticker} AND ${marketEvents.eventType} = 'EARNINGS'
-          AND ${marketEvents.fiscalPeriod} = ${item.fiscalPeriod}
-        `).orderBy(desc(marketEvents.publishedAt)).limit(1);
-        await ctx.db.insert(earningsResult).values({
-          ticker: item.ticker,
-          eventId: matchingEvent[0]?.id ?? null,
-          fiscalPeriod: item.fiscalPeriod,
-          reportedAt: item.reportedAt,
-          epsActual: item.epsActual === null ? null : String(item.epsActual),
-          epsConsensus: item.epsConsensus === null ? null : String(item.epsConsensus),
-          epsSurprisePct: item.epsSurprisePct === null ? null : String(item.epsSurprisePct),
-          revenueActual: item.revenueActual === null ? null : String(item.revenueActual),
-          revenueConsensus: item.revenueConsensus === null ? null : String(item.revenueConsensus),
-          revenueSurprisePct: item.revenueSurprisePct === null ? null : String(item.revenueSurprisePct),
-          guidanceActual: item.guidanceActual === null ? null : String(item.guidanceActual),
-          guidanceConsensus: item.guidanceConsensus === null ? null : String(item.guidanceConsensus),
-          guidanceSurprisePct: item.guidanceSurprisePct === null ? null : String(item.guidanceSurprisePct),
-          yoyRevenueGrowthPct: item.yoyRevenueGrowthPct === null ? null : String(item.yoyRevenueGrowthPct),
-          epsUnit: item.epsUnit ?? null,
-          epsCurrency: item.epsCurrency ?? null,
-          epsType: item.epsType ?? null,
-          revenueUnit: item.revenueUnit ?? null,
-          revenueCurrency: item.revenueCurrency ?? null,
-          consensusSource: item.consensusSource ?? null,
-          provider: ctx.config.fundamentalProvider,
-          dataStatus: configuredFeedStatus("fundamental"),
-          updatedAt: ctx.now,
-        }).onConflictDoUpdate({
-          target: [earningsResult.ticker, earningsResult.fiscalPeriod],
-          set: {
-            eventId: sql`excluded.event_id`, reportedAt: sql`excluded.reported_at`,
-            epsActual: sql`excluded.eps_actual`, epsConsensus: sql`excluded.eps_consensus`, epsSurprisePct: sql`excluded.eps_surprise_pct`,
-            revenueActual: sql`excluded.revenue_actual`, revenueConsensus: sql`excluded.revenue_consensus`, revenueSurprisePct: sql`excluded.revenue_surprise_pct`,
-            guidanceActual: sql`excluded.guidance_actual`, guidanceConsensus: sql`excluded.guidance_consensus`, guidanceSurprisePct: sql`excluded.guidance_surprise_pct`,
-            yoyRevenueGrowthPct: sql`excluded.yoy_revenue_growth_pct`, epsUnit: sql`excluded.eps_unit`, epsCurrency: sql`excluded.eps_currency`,
-            epsType: sql`excluded.eps_type`, revenueUnit: sql`excluded.revenue_unit`, revenueCurrency: sql`excluded.revenue_currency`,
-            consensusSource: sql`excluded.consensus_source`, provider: sql`excluded.provider`, dataStatus: sql`excluded.data_status`, updatedAt: ctx.now,
-          },
-        });
-      }
-    }
-
+    await persistFundamentals(ctx, universe.map((s) => s.ticker));
     await advanceMacro(ctx);
 
     return {
@@ -214,6 +212,14 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
       status: "succeeded",
       durationMs: Date.now() - started,
       processed,
+      rowsWritten: priceRows.length + volumeRows.length,
+      context: {
+        truncated,
+        dropped_bars: droppedBars,
+        skipped_tickers: skippedTickers,
+        price_rows: priceRows.length,
+        volume_rows: volumeRows.length,
+      },
     };
   } catch (err) {
     return {
@@ -224,6 +230,41 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * Absolute epoch-ms at which the market step must stop. Bounded by both the
+ * per-step budget and the whole-tick deadline, so the step can never run longer
+ * than the tick it belongs to.
+ */
+function stepDeadlineFor(ctx: PipelineContext): number {
+  const budgetDeadline = Date.now() + Math.max(1, ctx.config.pipelineStepBudgetMs);
+  return Number.isFinite(ctx.deadlineAt) ? Math.min(ctx.deadlineAt, budgetDeadline) : budgetDeadline;
+}
+
+/** Highest stored `ts` per ticker in a single batched query. */
+async function loadLastStoredTs(
+  ctx: PipelineContext,
+  tickers: string[],
+): Promise<Map<string, Date | null>> {
+  const baseline = new Map<string, Date | null>();
+  if (tickers.length === 0) {
+    return baseline;
+  }
+  const rows = await ctx.db
+    .select({
+      ticker: priceSnapshots.ticker,
+      lastTs: sql<Date | string | null>`max(${priceSnapshots.ts})`,
+    })
+    .from(priceSnapshots)
+    .where(inArray(priceSnapshots.ticker, tickers))
+    .groupBy(priceSnapshots.ticker);
+
+  for (const row of rows) {
+    const value = row.lastTs;
+    baseline.set(row.ticker, value === null || value === undefined ? null : value instanceof Date ? value : new Date(value));
+  }
+  return baseline;
 }
 
 /**
@@ -242,29 +283,30 @@ function snapshotWindowStart(now: Date): Date {
 }
 
 /**
- * Persists the provider's one-minute price and volume series (the same series
- * the event chart renders), upserting by `(ticker, ts)` so a re-run is
- * idempotent. RVOL is based on the previous 20 matched sessions at the same
- * point in the same session; insufficient history remains unavailable.
+ * Builds the one-minute price and volume rows for the selected bars. RVOL is
+ * based on the previous 20 matched sessions at the same point in the session;
+ * insufficient history remains unavailable.
  */
-async function persistMinuteSeries(
-  ctx: PipelineContext,
+function buildSnapshotRows(
   ticker: string,
   bars: Bar[],
   stats: DailyStats,
   sessionVwap: number | null,
   rvolByTime: Map<number, SessionRvolPoint>,
-): Promise<void> {
+  provider: string,
+  dataStatus: string,
+): {
+  priceRows: (typeof priceSnapshots.$inferInsert)[];
+  volumeRows: (typeof volumeSnapshots.$inferInsert)[];
+} {
+  const priceRows: (typeof priceSnapshots.$inferInsert)[] = [];
+  const volumeRows: (typeof volumeSnapshots.$inferInsert)[] = [];
   if (bars.length === 0) {
-    return;
+    return { priceRows, volumeRows };
   }
 
   const gapPct = stats.prevClose > 0 ? ((stats.open - stats.prevClose) / stats.prevClose) * 100 : null;
-  const provider = ctx.config.marketProvider;
-  const dataStatus = configuredFeedStatus("market");
 
-  const priceRows: (typeof priceSnapshots.$inferInsert)[] = [];
-  const volumeRows: (typeof volumeSnapshots.$inferInsert)[] = [];
   for (const bar of bars) {
     const ts = new Date(bar.time * 1000);
     const price = bar.close;
@@ -304,51 +346,138 @@ async function persistMinuteSeries(
     });
   }
 
-  await ctx.db
-    .insert(priceSnapshots)
-    .values(priceRows)
-    .onConflictDoUpdate({
-      target: [priceSnapshots.ticker, priceSnapshots.ts],
-      set: {
-        price: sql`excluded.price`,
-        session: sql`excluded.session`,
-        changePctDaily: sql`excluded.change_pct_daily`,
-        gapPct: sql`excluded.gap_pct`,
-        vwap: sql`excluded.vwap`,
-        high: sql`excluded.high`,
-        low: sql`excluded.low`,
-        open: sql`excluded.open`,
-        prevClose: sql`excluded.prev_close`,
-        provider: sql`excluded.provider`,
-        dataStatus: sql`excluded.data_status`,
-        referencePeriod: sql`excluded.reference_period`,
-        updatedAt: new Date(),
-      },
-    });
-
-  await ctx.db
-    .insert(volumeSnapshots)
-    .values(volumeRows)
-    .onConflictDoUpdate({
-      target: [volumeSnapshots.ticker, volumeSnapshots.ts],
-      set: {
-        cumulativeVolume: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.cumulative_volume ELSE ${volumeSnapshots.cumulativeVolume} END`,
-        intervalVolume: sql`excluded.interval_volume`,
-        provider: sql`excluded.provider`,
-        expectedVolumeToDate: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.expected_volume_to_date ELSE ${volumeSnapshots.expectedVolumeToDate} END`,
-        rvol: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.rvol ELSE ${volumeSnapshots.rvol} END`,
-        session: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.session ELSE ${volumeSnapshots.session} END`,
-        expectedSampleCount: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.expected_sample_count ELSE ${volumeSnapshots.expectedSampleCount} END`,
-        comparisonSession: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.comparison_session ELSE ${volumeSnapshots.comparisonSession} END`,
-        rvolAsOf: sql`coalesce(excluded.rvol_as_of, ${volumeSnapshots.rvolAsOf})`,
-        dataStatus: sql`excluded.data_status`,
-        updatedAt: new Date(),
-      },
-    });
+  return { priceRows, volumeRows };
 }
 
-function elapsedMinutes(ts: Date): number {
-  return Math.max(0, etWallClock(ts).minutes - REGULAR_OPEN_MINUTES);
+/**
+ * Persists the accumulated rows in chunked multi-row upserts, preserving the
+ * exact `(ticker, ts)` conflict targets and update expressions.
+ */
+async function upsertMarketRows(
+  ctx: PipelineContext,
+  priceRows: (typeof priceSnapshots.$inferInsert)[],
+  volumeRows: (typeof volumeSnapshots.$inferInsert)[],
+): Promise<void> {
+  for (const chunk of chunkRows(priceRows)) {
+    await ctx.db
+      .insert(priceSnapshots)
+      .values(chunk)
+      .onConflictDoUpdate({
+        target: [priceSnapshots.ticker, priceSnapshots.ts],
+        set: {
+          price: sql`excluded.price`,
+          session: sql`excluded.session`,
+          changePctDaily: sql`excluded.change_pct_daily`,
+          gapPct: sql`excluded.gap_pct`,
+          vwap: sql`excluded.vwap`,
+          high: sql`excluded.high`,
+          low: sql`excluded.low`,
+          open: sql`excluded.open`,
+          prevClose: sql`excluded.prev_close`,
+          provider: sql`excluded.provider`,
+          dataStatus: sql`excluded.data_status`,
+          referencePeriod: sql`excluded.reference_period`,
+          updatedAt: new Date(),
+        },
+      });
+  }
+
+  for (const chunk of chunkRows(volumeRows)) {
+    await ctx.db
+      .insert(volumeSnapshots)
+      .values(chunk)
+      .onConflictDoUpdate({
+        target: [volumeSnapshots.ticker, volumeSnapshots.ts],
+        set: {
+          cumulativeVolume: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.cumulative_volume ELSE ${volumeSnapshots.cumulativeVolume} END`,
+          intervalVolume: sql`excluded.interval_volume`,
+          provider: sql`excluded.provider`,
+          expectedVolumeToDate: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.expected_volume_to_date ELSE ${volumeSnapshots.expectedVolumeToDate} END`,
+          rvol: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.rvol ELSE ${volumeSnapshots.rvol} END`,
+          session: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.session ELSE ${volumeSnapshots.session} END`,
+          expectedSampleCount: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.expected_sample_count ELSE ${volumeSnapshots.expectedSampleCount} END`,
+          comparisonSession: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.comparison_session ELSE ${volumeSnapshots.comparisonSession} END`,
+          rvolAsOf: sql`coalesce(excluded.rvol_as_of, ${volumeSnapshots.rvolAsOf})`,
+          dataStatus: sql`excluded.data_status`,
+          updatedAt: new Date(),
+        },
+      });
+  }
+}
+
+/** Upserts expectations + earnings for the universe tickers (unchanged contract). */
+async function persistFundamentals(ctx: PipelineContext, tickers: string[]): Promise<void> {
+  for (const ticker of tickers) {
+    const [expectations, earnings] = await Promise.all([
+      ctx.providers.fundamental.expectations(ticker),
+      ctx.providers.fundamental.earnings(ticker),
+    ]);
+    for (const item of expectations) {
+      await ctx.db.insert(fundamentalExpectations).values({
+        ticker: item.ticker,
+        fiscalPeriod: item.fiscalPeriod,
+        metric: item.metric,
+        consensus: String(item.consensus),
+        unit: item.unit,
+        asOf: item.asOf,
+        source: item.source,
+        currency: item.currency ?? null,
+        epsType: item.epsType ?? null,
+        provider: ctx.config.fundamentalProvider,
+        dataStatus: configuredFeedStatus("fundamental"),
+        updatedAt: ctx.now,
+      }).onConflictDoUpdate({
+        target: [fundamentalExpectations.ticker, fundamentalExpectations.fiscalPeriod, fundamentalExpectations.metric],
+        set: {
+          consensus: sql`excluded.consensus`, unit: sql`excluded.unit`, asOf: sql`excluded.as_of`,
+          source: sql`excluded.source`, currency: sql`excluded.currency`, epsType: sql`excluded.eps_type`,
+          provider: sql`excluded.provider`, dataStatus: sql`excluded.data_status`, updatedAt: ctx.now,
+        },
+      });
+    }
+    for (const item of earnings) {
+      const matchingEvent = await ctx.db.select({ id: marketEvents.id }).from(marketEvents).where(sql`
+        ${marketEvents.ticker} = ${ticker} AND ${marketEvents.eventType} = 'EARNINGS'
+        AND ${marketEvents.fiscalPeriod} = ${item.fiscalPeriod}
+      `).orderBy(desc(marketEvents.publishedAt)).limit(1);
+      await ctx.db.insert(earningsResult).values({
+        ticker: item.ticker,
+        eventId: matchingEvent[0]?.id ?? null,
+        fiscalPeriod: item.fiscalPeriod,
+        reportedAt: item.reportedAt,
+        epsActual: item.epsActual === null ? null : String(item.epsActual),
+        epsConsensus: item.epsConsensus === null ? null : String(item.epsConsensus),
+        epsSurprisePct: item.epsSurprisePct === null ? null : String(item.epsSurprisePct),
+        revenueActual: item.revenueActual === null ? null : String(item.revenueActual),
+        revenueConsensus: item.revenueConsensus === null ? null : String(item.revenueConsensus),
+        revenueSurprisePct: item.revenueSurprisePct === null ? null : String(item.revenueSurprisePct),
+        guidanceActual: item.guidanceActual === null ? null : String(item.guidanceActual),
+        guidanceConsensus: item.guidanceConsensus === null ? null : String(item.guidanceConsensus),
+        guidanceSurprisePct: item.guidanceSurprisePct === null ? null : String(item.guidanceSurprisePct),
+        yoyRevenueGrowthPct: item.yoyRevenueGrowthPct === null ? null : String(item.yoyRevenueGrowthPct),
+        epsUnit: item.epsUnit ?? null,
+        epsCurrency: item.epsCurrency ?? null,
+        epsType: item.epsType ?? null,
+        revenueUnit: item.revenueUnit ?? null,
+        revenueCurrency: item.revenueCurrency ?? null,
+        consensusSource: item.consensusSource ?? null,
+        provider: ctx.config.fundamentalProvider,
+        dataStatus: configuredFeedStatus("fundamental"),
+        updatedAt: ctx.now,
+      }).onConflictDoUpdate({
+        target: [earningsResult.ticker, earningsResult.fiscalPeriod],
+        set: {
+          eventId: sql`excluded.event_id`, reportedAt: sql`excluded.reported_at`,
+          epsActual: sql`excluded.eps_actual`, epsConsensus: sql`excluded.eps_consensus`, epsSurprisePct: sql`excluded.eps_surprise_pct`,
+          revenueActual: sql`excluded.revenue_actual`, revenueConsensus: sql`excluded.revenue_consensus`, revenueSurprisePct: sql`excluded.revenue_surprise_pct`,
+          guidanceActual: sql`excluded.guidance_actual`, guidanceConsensus: sql`excluded.guidance_consensus`, guidanceSurprisePct: sql`excluded.guidance_surprise_pct`,
+          yoyRevenueGrowthPct: sql`excluded.yoy_revenue_growth_pct`, epsUnit: sql`excluded.eps_unit`, epsCurrency: sql`excluded.eps_currency`,
+          epsType: sql`excluded.eps_type`, revenueUnit: sql`excluded.revenue_unit`, revenueCurrency: sql`excluded.revenue_currency`,
+          consensusSource: sql`excluded.consensus_source`, provider: sql`excluded.provider`, dataStatus: sql`excluded.data_status`, updatedAt: ctx.now,
+        },
+      });
+    }
+  }
 }
 
 /**

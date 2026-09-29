@@ -188,10 +188,31 @@ function minutesSinceRegularOpen(at: Date): number {
   return minutes - REGULAR_OPEN_MINUTES;
 }
 
+/**
+ * Process-wide cache of generated minute series, keyed by
+ * `ticker:interval:sessionDate`. The pipeline calls `bars()` on every tick with
+ * a rolling 50-day window; regenerating every minute each time dominated the
+ * tick on a small container. Entries are append-only for the live session and
+ * frozen for past sessions, so determinism is preserved (a bar at time `t` is a
+ * pure function of `t`). `applyCatalyst` clears the cache because catalysts
+ * change the generated prices.
+ */
+const MAX_SERIES_CACHE_ENTRIES = 128;
+
+interface IntradaySeries {
+  /** Aligned start (ms) of the generated series. */
+  startMs: number;
+  /** Next bar timestamp (ms) still to generate. */
+  nextMs: number;
+  /** Contiguous, ascending bars from `startMs` up to the last generated minute. */
+  bars: Bar[];
+}
+
 export class MockMarketProvider implements MarketDataProvider {
   private readonly catalysts = new Map<string, Catalyst[]>();
   private readonly closeCache = new Map<string, { index: number; closes: number[] }>();
   private readonly pathCache = new Map<string, IntradayPath>();
+  private readonly seriesCache = new Map<string, IntradaySeries>();
 
   anchorPrice(ticker: string): number | null {
     const value = ANCHOR_PRICES[ticker];
@@ -218,6 +239,8 @@ export class MockMarketProvider implements MarketDataProvider {
       decayMinutes: 30,
     });
     this.catalysts.set(ticker, list);
+    // Catalysts scale the generated prices, so any memoised series is stale.
+    this.seriesCache.clear();
   }
 
   async quote(ticker: string, at: Date = new Date()): Promise<Quote | null> {
@@ -262,25 +285,63 @@ export class MockMarketProvider implements MarketDataProvider {
     const stepMs = intervalMinutes * 60 * 1000;
     const start = Math.floor(opts.from.getTime() / stepMs) * stepMs;
     const end = opts.to.getTime();
-    const bars: Bar[] = [];
-    const adv = this.avgDailyVolume(ticker);
+    const key = `${ticker}:${intervalMinutes}:${dayKey(opts.to)}`;
 
-    for (let t = start; t <= end; t += stepMs) {
-      const ts = new Date(t);
-      const next = new Date(t + stepMs);
-      const open = round(this.intradayPrice(ticker, ts), 2);
-      const close = round(this.intradayPrice(ticker, next), 2);
-      const rng = mulberry32(hashString(`${ticker}:${t}`));
-      const high = round(Math.max(open, close) * (1 + rng() * 0.0012), 2);
-      const low = round(Math.min(open, close) * (1 - rng() * 0.0012), 2);
-      const elapsed = Math.max(0, minutesSinceRegularOpen(ts));
-      const fraction =
-        volumeProfileFraction(elapsed + intervalMinutes) - volumeProfileFraction(elapsed);
-      const volume = Math.max(1_000, Math.round(adv * Math.max(0.0002, fraction)));
-      bars.push({ time: Math.floor(t / 1000), open, high, low, close, volume });
+    let entry = this.seriesCache.get(key);
+    if (entry && entry.startMs > start) {
+      // A caller asked for a wider history than was generated for this session;
+      // regenerate from scratch instead of returning a short window.
+      entry = undefined;
+    }
+    if (!entry) {
+      entry = { startMs: start, nextMs: start, bars: [] };
+      this.seriesCache.set(key, entry);
+      this.trimSeriesCache();
     }
 
-    return bars;
+    if (end >= entry.nextMs) {
+      const adv = this.avgDailyVolume(ticker);
+      for (let t = entry.nextMs; t <= end; t += stepMs) {
+        entry.bars.push(this.buildIntradayBar(ticker, t, intervalMinutes, stepMs, adv));
+      }
+      while (entry.nextMs <= end) {
+        entry.nextMs += stepMs;
+      }
+    }
+
+    return entry.bars.filter((bar) => bar.time * 1000 >= start && bar.time * 1000 <= end);
+  }
+
+  /** A single generated minute bar; a pure function of `(ticker, t, interval)`. */
+  private buildIntradayBar(
+    ticker: string,
+    t: number,
+    intervalMinutes: number,
+    stepMs: number,
+    adv: number,
+  ): Bar {
+    const ts = new Date(t);
+    const next = new Date(t + stepMs);
+    const open = round(this.intradayPrice(ticker, ts), 2);
+    const close = round(this.intradayPrice(ticker, next), 2);
+    const rng = mulberry32(hashString(`${ticker}:${t}`));
+    const high = round(Math.max(open, close) * (1 + rng() * 0.0012), 2);
+    const low = round(Math.min(open, close) * (1 - rng() * 0.0012), 2);
+    const elapsed = Math.max(0, minutesSinceRegularOpen(ts));
+    const fraction =
+      volumeProfileFraction(elapsed + intervalMinutes) - volumeProfileFraction(elapsed);
+    const volume = Math.max(1_000, Math.round(adv * Math.max(0.0002, fraction)));
+    return { time: Math.floor(t / 1000), open, high, low, close, volume };
+  }
+
+  private trimSeriesCache(): void {
+    while (this.seriesCache.size > MAX_SERIES_CACHE_ENTRIES) {
+      const oldest = this.seriesCache.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.seriesCache.delete(oldest);
+    }
   }
 
   async dailyBars(ticker: string, count: number, at: Date = new Date()): Promise<Bar[]> {

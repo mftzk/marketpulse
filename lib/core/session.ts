@@ -37,11 +37,17 @@ export interface EtWallClock {
 }
 
 /**
- * Resolves a timestamp to its Eastern Time wall-clock (weekday + minutes since
- * midnight) using the fixed `America/New_York` timezone (DST-aware via the
- * Intl API).
+ * Process-wide memo for `etWallClock`. `Intl.DateTimeFormat.formatToParts` is
+ * expensive (~tens of microseconds); the market pipeline resolves the wall clock
+ * for tens of thousands of minute bars per pass, and every ticker shares the
+ * same minute grid. Caching by epoch-second turns repeat passes into Map lookups
+ * while keeping the function pure (same timestamp → same result). Bounded so a
+ * long-lived process cannot grow without limit.
  */
-export function etWallClock(ts: Date): EtWallClock {
+const ET_WALL_CLOCK_CACHE = new Map<number, EtWallClock>();
+const MAX_ET_WALL_CLOCK_ENTRIES = 200_000;
+
+function computeEtWallClock(ts: Date): EtWallClock {
   let hour = 0;
   let minute = 0;
   for (const part of ET_TIME_FORMATTER.formatToParts(ts)) {
@@ -68,11 +74,30 @@ export function etWallClock(ts: Date): EtWallClock {
 }
 
 /**
- * Maps a timestamp to the US equity market session it falls in. Weekends are
- * always `closed`. Overnight hours (20:00–04:00 ET) are also `closed`.
+ * Resolves a timestamp to its Eastern Time wall-clock (weekday + minutes since
+ * midnight) using the fixed `America/New_York` timezone (DST-aware via the
+ * Intl API), memoised per epoch-second.
  */
-export function sessionFor(ts: Date): MarketSession {
-  const { weekday, minutes } = etWallClock(ts);
+export function etWallClock(ts: Date): EtWallClock {
+  const key = Math.floor(ts.getTime() / 1000);
+  const cached = ET_WALL_CLOCK_CACHE.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const value = computeEtWallClock(ts);
+  if (ET_WALL_CLOCK_CACHE.size >= MAX_ET_WALL_CLOCK_ENTRIES) {
+    ET_WALL_CLOCK_CACHE.clear();
+  }
+  ET_WALL_CLOCK_CACHE.set(key, value);
+  return value;
+}
+
+/**
+ * Maps an already-resolved Eastern wall-clock to a market session. Hot loops
+ * (RVOL over a full minute series) resolve the wall clock once per bar and call
+ * this, avoiding a second `Intl` format pass.
+ */
+export function sessionForWallClock({ weekday, minutes }: EtWallClock): MarketSession {
   if (weekday === 0 || weekday === 6) {
     return "closed";
   }
@@ -86,6 +111,14 @@ export function sessionFor(ts: Date): MarketSession {
     return "after_hours";
   }
   return "closed";
+}
+
+/**
+ * Maps a timestamp to the US equity market session it falls in. Weekends are
+ * always `closed`. Overnight hours (20:00–04:00 ET) are also `closed`.
+ */
+export function sessionFor(ts: Date): MarketSession {
+  return sessionForWallClock(etWallClock(ts));
 }
 
 /**

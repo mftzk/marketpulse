@@ -99,6 +99,14 @@ export interface Config {
   pipelineTickSeconds: number;
   /** Hard ceiling for a single pipeline tick (ms). Exceeded → failed, lock released. */
   pipelineTickDeadlineMs: number;
+  /** Soft budget for one pipeline step (ms). Steps that can, stop early and resume next tick. */
+  pipelineStepBudgetMs: number;
+  /** Hard cap on market rows written per table per tick, across all tickers. */
+  pipelineMarketMaxRows: number;
+  /** Hard cap on minute bars persisted per ticker per tick (newest slice wins). */
+  pipelineMarketMaxBarsPerTicker: number;
+  /** Timeout applied to every vendor HTTP request (ms). */
+  providerHttpTimeoutMs: number;
   logLevel: LogLevel;
   appUrl: string | null;
   isProduction: boolean;
@@ -135,6 +143,13 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   const logLevel = parseLogLevel(nonEmpty(env.LOG_LEVEL));
   const pipelineTickSeconds = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_SECONDS), 30);
   const pipelineTickDeadlineMs = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_DEADLINE_MS), 90_000);
+  const pipelineStepBudgetMs = parsePositiveInt(nonEmpty(env.PIPELINE_STEP_BUDGET_MS), 20_000);
+  const pipelineMarketMaxRows = parsePositiveInt(nonEmpty(env.PIPELINE_MARKET_MAX_ROWS), 2_000);
+  const pipelineMarketMaxBarsPerTicker = parsePositiveInt(
+    nonEmpty(env.PIPELINE_MARKET_MAX_BARS_PER_TICKER),
+    500,
+  );
+  const providerHttpTimeoutMs = parsePositiveInt(nonEmpty(env.PROVIDER_HTTP_TIMEOUT_MS), 8_000);
 
   // Auth is enabled unless explicitly disabled. A missing/short secret never
   // throws at import time (that would break `next build`, which has no runtime
@@ -166,6 +181,10 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     pipelineAutorun: parseBoolean(nonEmpty(env.PIPELINE_AUTORUN), false),
     pipelineTickSeconds,
     pipelineTickDeadlineMs,
+    pipelineStepBudgetMs,
+    pipelineMarketMaxRows,
+    pipelineMarketMaxBarsPerTicker,
+    providerHttpTimeoutMs,
     logLevel,
     appUrl,
     isProduction: nonEmpty(env.NODE_ENV) === "production",

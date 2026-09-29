@@ -1,4 +1,4 @@
-import { desc, sql } from "drizzle-orm";
+import { asc, desc, inArray, sql } from "drizzle-orm";
 
 import { getDb } from "@/lib/db/client";
 import { pipelineJobs, pipelineRuns } from "@/lib/db/schema";
@@ -23,6 +23,39 @@ export async function getPipelineStatus(): Promise<Record<string, unknown>> {
     .from(pipelineRuns)
     .orderBy(desc(pipelineRuns.startedAt))
     .limit(10);
+
+  // Per-step durations for the recent runs so an incident is diagnosable from
+  // the status endpoint alone (no log access needed).
+  const runIds = recentRuns.map((run) => run.id);
+  const jobRows = runIds.length > 0
+    ? await db
+      .select({
+        runId: pipelineJobs.runId,
+        name: pipelineJobs.name,
+        status: pipelineJobs.status,
+        durationMs: pipelineJobs.durationMs,
+        processed: pipelineJobs.processed,
+        error: pipelineJobs.error,
+      })
+      .from(pipelineJobs)
+      .where(inArray(pipelineJobs.runId, runIds))
+      .orderBy(asc(pipelineJobs.createdAt))
+    : [];
+  const stepsByRun = new Map<
+    string,
+    Array<{ name: string; status: string; duration_ms: number | null; processed: number; error: string | null }>
+  >();
+  for (const job of jobRows) {
+    const list = stepsByRun.get(job.runId) ?? [];
+    list.push({
+      name: job.name,
+      status: job.status,
+      duration_ms: job.durationMs,
+      processed: job.processed,
+      error: job.error,
+    });
+    stepsByRun.set(job.runId, list);
+  }
 
   const byStatus = await db
     .select({
@@ -61,6 +94,7 @@ export async function getPipelineStatus(): Promise<Record<string, unknown>> {
         articles_ingested: r.articlesIngested,
         alerts_triggered: r.alertsTriggered,
         error: stale ? STALE_RUN_ERROR : r.error,
+        steps: stepsByRun.get(r.id) ?? [],
       };
     }),
     jobs: { by_status: jobsByStatus },

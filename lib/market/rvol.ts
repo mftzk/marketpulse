@@ -1,4 +1,4 @@
-import { etWallClock, sessionFor, type MarketSession } from "@/lib/core/session";
+import { etWallClock, sessionFor, sessionForWallClock, type MarketSession } from "@/lib/core/session";
 
 /**
  * Relative volume (§6.2). Pure functions.
@@ -44,21 +44,46 @@ function interpolateAt(
   elapsedMinutes: number,
 ): number | null {
   const sorted = [...points].sort((a, b) => a.elapsedMinutes - b.elapsedMinutes);
-  if (sorted.length === 0) {
+  return interpolateSortedAt(sorted, elapsedMinutes);
+}
+
+/**
+ * Interpolates a cumulative-volume value from points already sorted ascending by
+ * `elapsedMinutes` (binary search, no allocation). `curvesFromBars` produces
+ * sorted points, so the hot RVOL loop uses this instead of re-sorting per call.
+ */
+function interpolateSortedAt(
+  points: SessionVolumePoint[],
+  elapsedMinutes: number,
+): number | null {
+  if (points.length === 0) {
     return null;
   }
-  const exact = sorted.find((p) => p.elapsedMinutes === elapsedMinutes);
-  if (exact) {
-    return exact.cumulativeVolume;
+  let lo = 0;
+  let hi = points.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const point = points[mid];
+    if (point.elapsedMinutes === elapsedMinutes) {
+      return point.cumulativeVolume;
+    }
+    if (point.elapsedMinutes < elapsedMinutes) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
   }
-  const before = [...sorted].reverse().find((p) => p.elapsedMinutes < elapsedMinutes);
-  const after = sorted.find((p) => p.elapsedMinutes > elapsedMinutes);
-  if (before && after) {
-    const span = after.elapsedMinutes - before.elapsedMinutes;
-    const t = (elapsedMinutes - before.elapsedMinutes) / span;
-    return before.cumulativeVolume + t * (after.cumulativeVolume - before.cumulativeVolume);
+  const after = points[lo];
+  const before = points[hi];
+  if (!before || !after) {
+    return null;
   }
-  return null;
+  const span = after.elapsedMinutes - before.elapsedMinutes;
+  if (span <= 0) {
+    return before.cumulativeVolume;
+  }
+  const t = (elapsedMinutes - before.elapsedMinutes) / span;
+  return before.cumulativeVolume + t * (after.cumulativeVolume - before.cumulativeVolume);
 }
 
 export interface ExpectedVolumeInput {
@@ -133,12 +158,33 @@ interface SessionCurve {
   timestamps: Date[];
 }
 
+/**
+ * Hoisted formatter: constructing `Intl.DateTimeFormat` per bar was the dominant
+ * cost of the RVOL pass over a full 50-day minute series (tens of thousands of
+ * constructions per ticker per tick).
+ */
+const ET_DATE_FORMATTER = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+});
+
+/** Memoised per epoch-second; all tickers share the same minute grid. */
+const EASTERN_DATE_CACHE = new Map<number, string>();
+const MAX_EASTERN_DATE_ENTRIES = 200_000;
+
 function easternDate(ts: Date): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
-  }).formatToParts(ts);
+  const key = Math.floor(ts.getTime() / 1000);
+  const cached = EASTERN_DATE_CACHE.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const parts = ET_DATE_FORMATTER.formatToParts(ts);
   const get = (name: string) => parts.find((part) => part.type === name)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")}`;
+  const value = `${get("year")}-${get("month")}-${get("day")}`;
+  if (EASTERN_DATE_CACHE.size >= MAX_EASTERN_DATE_ENTRIES) {
+    EASTERN_DATE_CACHE.clear();
+  }
+  EASTERN_DATE_CACHE.set(key, value);
+  return value;
 }
 
 function sessionStartMinute(session: Exclude<MarketSession, "closed">): number {
@@ -146,16 +192,17 @@ function sessionStartMinute(session: Exclude<MarketSession, "closed">): number {
 }
 
 function curvesFromBars(bars: readonly TimedVolumeBar[]): SessionCurve[] {
-  const groups = new Map<string, { date: string; session: Exclude<MarketSession, "closed">; bars: { ts: Date; volume: number }[] }>();
+  const groups = new Map<string, { date: string; session: Exclude<MarketSession, "closed">; bars: { ts: Date; volume: number; minutes: number }[] }>();
   for (const bar of bars) {
     if (!Number.isFinite(bar.time) || !Number.isFinite(bar.volume) || bar.volume < 0) continue;
     const ts = new Date(bar.time * 1000);
-    const session = sessionFor(ts);
+    const wall = etWallClock(ts);
+    const session = sessionForWallClock(wall);
     if (session === "closed") continue;
     const date = easternDate(ts);
     const key = `${date}:${session}`;
     const group = groups.get(key) ?? { date, session, bars: [] };
-    group.bars.push({ ts, volume: bar.volume });
+    group.bars.push({ ts, volume: bar.volume, minutes: wall.minutes });
     groups.set(key, group);
   }
   return [...groups.values()].map((group) => {
@@ -163,8 +210,7 @@ function curvesFromBars(bars: readonly TimedVolumeBar[]): SessionCurve[] {
     let cumulative = 0;
     const points: SessionVolumePoint[] = [];
     for (const item of ordered) {
-      const wall = etWallClock(item.ts);
-      const elapsedMinutes = wall.minutes - sessionStartMinute(group.session);
+      const elapsedMinutes = item.minutes - sessionStartMinute(group.session);
       if (elapsedMinutes < 0) continue;
       cumulative += item.volume;
       points.push({ elapsedMinutes, cumulativeVolume: cumulative });
@@ -207,7 +253,7 @@ export function matchedSessionRvol(
   for (let i = 0; i < target.points.length; i += 1) {
     const point = target.points[i];
     if (point.elapsedMinutes > at) continue;
-    const samples = history.map((session) => interpolateAt(session, point.elapsedMinutes))
+    const samples = history.map((session) => interpolateSortedAt(session, point.elapsedMinutes))
       .filter((value): value is number => value !== null && Number.isFinite(value));
     const expected = samples.length >= priorSessionCount
       ? samples.slice(-priorSessionCount).reduce((sum, value) => sum + value, 0) / priorSessionCount

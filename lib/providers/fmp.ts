@@ -1,4 +1,5 @@
 import { surprisePct } from "@/lib/analysis/surprise";
+import { config } from "@/lib/config";
 import type { EarningsResult, ExpectationMetric, FundamentalDataProvider, FundamentalExpectation } from "@/lib/providers/types";
 
 const BASE = "https://financialmodelingprep.com/stable";
@@ -46,7 +47,7 @@ export class FmpFundamentalProvider implements FundamentalDataProvider {
     url.searchParams.set("symbol", ticker);
     url.searchParams.set("apikey", this.apiKey);
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(12_000) });
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(config.providerHttpTimeoutMs) });
     if (!response.ok) throw new Error(`FMP request failed (${response.status})`);
     const value: unknown = await response.json();
     return Array.isArray(value) ? value as Row[] : [];

@@ -146,7 +146,7 @@ async function releaseAdvisoryLock(conn: ReservedConnection): Promise<void> {
   }
 }
 
-async function buildContext(runId: string, force: boolean): Promise<PipelineContext> {
+async function buildContext(runId: string, force: boolean, deadlineAt: number): Promise<PipelineContext> {
   return {
     db: getDb(),
     cache: await createCacheStore(),
@@ -158,6 +158,7 @@ async function buildContext(runId: string, force: boolean): Promise<PipelineCont
     logger,
     config,
     now: new Date(),
+    deadlineAt,
     runId,
     force,
     counters: createCounters(),
@@ -201,6 +202,15 @@ async function runStep(
           updatedAt: finishedAt,
         })
         .where(sql`${pipelineJobs.id} = ${jobId}`);
+      ctx.logger.info("pipeline_step_completed", {
+        event: "pipeline.run",
+        run_id: ctx.runId,
+        name,
+        status: result.status,
+        duration_ms: result.durationMs,
+        rows_written: result.rowsWritten ?? 0,
+        processed: result.processed,
+      });
       return result;
     } catch (err) {
       const isTransient = isTransientError(err);
@@ -224,6 +234,15 @@ async function runStep(
           updatedAt: finishedAt,
         })
         .where(sql`${pipelineJobs.id} = ${jobId}`);
+      ctx.logger.warn("pipeline_step_completed", {
+        event: "pipeline.run",
+        run_id: ctx.runId,
+        name,
+        status: "failed",
+        duration_ms: finishedAt.getTime() - startedAt.getTime(),
+        rows_written: 0,
+        error: message,
+      });
       return {
         name,
         status: "failed",
@@ -331,7 +350,8 @@ async function runTickBody(
     context: { steps: options.steps ?? null, force: options.force ?? false },
   });
 
-  const ctx = await buildContext(runId, options.force ?? false);
+  const deadlineAt = started + (options.deadlineMs ?? config.pipelineTickDeadlineMs);
+  const ctx = await buildContext(runId, options.force ?? false, deadlineAt);
   tickState.counters = ctx.counters;
 
   const stepsToRun: Array<{ name: string; step: Step }> = [];

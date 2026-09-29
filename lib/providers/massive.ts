@@ -1,3 +1,4 @@
+import { config } from "@/lib/config";
 import { etWallClock, sessionFor } from "@/lib/core/session";
 import type { Bar, DailyStats, MarketDataProvider, MarketSnapshot, Quote } from "@/lib/providers/types";
 
@@ -51,7 +52,7 @@ export class MassiveMarketProvider implements MarketDataProvider {
     const url = new URL(path, BASE);
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
     url.searchParams.set("apiKey", this.apiKey);
-    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(12_000) });
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(config.providerHttpTimeoutMs) });
     if (!response.ok) throw new Error(`Massive request failed (${response.status})`);
     return await response.json() as JsonRecord;
   }

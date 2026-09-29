@@ -56,6 +56,8 @@ export interface PipelineContext {
   logger: Logger;
   config: Config;
   now: Date;
+  /** Absolute epoch-ms by which the whole tick must finish (cooperative cancellation). */
+  deadlineAt: number;
   runId: string;
   force: boolean;
   counters: PipelineCounters;

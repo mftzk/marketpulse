@@ -1,3 +1,4 @@
+import { config } from "@/lib/config";
 import type { NewsArticle, NewsProvider, NewsSource } from "@/lib/providers/types";
 
 const BASE = "https://api.benzinga.com/api/v2";
@@ -37,7 +38,7 @@ export class BenzingaNewsProvider implements NewsProvider {
     url.searchParams.set("displayOutput", "full");
     url.searchParams.set("pageSize", "100");
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(12_000) });
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(config.providerHttpTimeoutMs) });
     if (!response.ok) throw new Error(`Benzinga request failed (${response.status})`);
     return response.json();
   }
