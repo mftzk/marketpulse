@@ -98,18 +98,33 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * LLM-budget counters worth surfacing on the per-step log line (and, via
- * `pipeline_jobs.context`, on `/api/pipeline/status`) so a deferred tick is
- * diagnosable without log access.
+ * Per-step counters worth surfacing on the per-step log line (and, via
+ * `pipeline_jobs.context`, on `/api/pipeline/status`) so a deferred or bounded
+ * tick is diagnosable without log access. Includes the LLM budget, the
+ * incremental tail-step counters (`deferred`, `skipped_unchanged`,
+ * `skipped_no_budget`) and `db_queries`.
  */
-const LLM_COUNTER_KEYS = ["llm_calls", "classified", "deferred", "skipped_no_budget", "circuit_open"] as const;
+const STEP_COUNTER_KEYS = [
+  "llm_calls",
+  "classified",
+  "circuit_open",
+  "deferred",
+  "skipped_unchanged",
+  "skipped_no_budget",
+  "evaluated",
+  "triggered",
+  "truncated",
+  "skipped_tickers",
+  "dropped_bars",
+  "db_queries",
+] as const;
 
-function llmCounters(context: Record<string, unknown> | undefined): Record<string, unknown> {
+function stepCounters(context: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!context) {
     return {};
   }
   const out: Record<string, unknown> = {};
-  for (const key of LLM_COUNTER_KEYS) {
+  for (const key of STEP_COUNTER_KEYS) {
     if (key in context) {
       out[key] = context[key];
     }
@@ -230,7 +245,7 @@ async function runStep(
         duration_ms: result.durationMs,
         rows_written: result.rowsWritten ?? 0,
         processed: result.processed,
-        ...llmCounters(result.context),
+        ...stepCounters(result.context),
       });
       return result;
     } catch (err) {

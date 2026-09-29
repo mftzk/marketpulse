@@ -249,6 +249,14 @@ export const marketEvents = pgTable(
     latestUpdateAt: timestamp("latest_update_at", { withTimezone: true }).notNull().defaultNow(),
     firstReceivedAt: timestamp("first_received_at", { withTimezone: true }).notNull().defaultNow(),
     fiscalPeriod: text("fiscal_period"),
+    /** Tick time of the last market-reaction refresh (migration 0005). */
+    reactionComputedAt: timestamp("reaction_computed_at", { withTimezone: true }),
+    /** True once the 24h reaction window closed and the reaction was frozen. */
+    reactionFinal: boolean("reaction_final").notNull().default(false),
+    /** Last alert evaluation time (migration 0005). */
+    alertsEvaluatedAt: timestamp("alerts_evaluated_at", { withTimezone: true }),
+    /** Hash of the alert-evaluation inputs (migration 0005). */
+    alertsStateHash: text("alerts_state_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -489,6 +497,8 @@ export const impactScores = pgTable(
     rvolExpectedVolume: numeric("rvol_expected_volume"),
     rvolSampleCount: integer("rvol_sample_count"),
     rvolSession: marketSessionEnum("rvol_session"),
+    /** Deterministic hash of the score inputs (migration 0005). */
+    inputHash: text("input_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -653,6 +663,10 @@ export const marketEventsPublishedAtIdx = index("market_events_published_at_idx"
 );
 export const marketEventsCreatedAtIdx = index("market_events_created_at_idx").on(
   sql`${marketEvents.createdAt} DESC`,
+);
+export const marketEventsReactionFinalIdx = index("market_events_reaction_final_idx").on(
+  sql`${marketEvents.reactionFinal}`,
+  sql`${marketEvents.reactionComputedAt}`,
 );
 export const impactScoresScoreIdx = index("impact_scores_score_idx").on(
   sql`${impactScores.score} DESC`,

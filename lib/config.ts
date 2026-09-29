@@ -115,6 +115,13 @@ export interface Config {
   pipelineMarketMaxRows: number;
   /** Hard cap on minute bars persisted per ticker per tick (newest slice wins). */
   pipelineMarketMaxBarsPerTicker: number;
+  /**
+   * Hard cap on the number of events the incremental tail steps
+   * (`calculate_market_reaction`, `calculate_impact_score`, `evaluate_alerts`)
+   * may (re)write per tick. The remainder is deferred to later ticks so a
+   * backlog drains monotonically instead of overrunning the tick deadline.
+   */
+  pipelineMaxEventsPerTick: number;
   /** Timeout applied to every vendor HTTP request (ms). */
   providerHttpTimeoutMs: number;
   logLevel: LogLevel;
@@ -162,6 +169,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     nonEmpty(env.PIPELINE_MARKET_MAX_BARS_PER_TICKER),
     500,
   );
+  const pipelineMaxEventsPerTick = parsePositiveInt(nonEmpty(env.PIPELINE_MAX_EVENTS_PER_TICK), 40);
   const providerHttpTimeoutMs = parsePositiveInt(nonEmpty(env.PROVIDER_HTTP_TIMEOUT_MS), 8_000);
 
   // Auth is enabled unless explicitly disabled. A missing/short secret never
@@ -200,6 +208,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     llmTimeoutMs,
     pipelineMarketMaxRows,
     pipelineMarketMaxBarsPerTicker,
+    pipelineMaxEventsPerTick,
     providerHttpTimeoutMs,
     logLevel,
     appUrl,
