@@ -95,6 +95,8 @@ export interface Config {
   massiveApiKey: string | null;
   benzingaApiKey: string | null;
   fmpApiKey: string | null;
+  /** In-process FMP fundamentals cache TTL (ms). Quarterly data — default 12h. */
+  fmpCacheTtlMs: number;
   pipelineAutorun: boolean;
   pipelineTickSeconds: number;
   /** Hard ceiling for a single pipeline tick (ms). Exceeded → failed, lock released. */
@@ -156,6 +158,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   const massiveApiKey = nonEmpty(env.MASSIVE_API_KEY);
   const benzingaApiKey = nonEmpty(env.BENZINGA_API_KEY);
   const fmpApiKey = nonEmpty(env.FMP_API_KEY);
+  const fmpCacheTtlMs = parsePositiveInt(nonEmpty(env.FMP_CACHE_TTL_MS), 43_200_000);
 
   const logLevel = parseLogLevel(nonEmpty(env.LOG_LEVEL));
   const pipelineTickSeconds = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_SECONDS), 30);
@@ -199,6 +202,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     massiveApiKey,
     benzingaApiKey,
     fmpApiKey,
+    fmpCacheTtlMs,
     pipelineAutorun: parseBoolean(nonEmpty(env.PIPELINE_AUTORUN), false),
     pipelineTickSeconds,
     pipelineTickDeadlineMs,

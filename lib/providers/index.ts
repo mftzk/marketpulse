@@ -59,10 +59,39 @@ export function getFundamentalDataProvider(): FundamentalDataProvider {
 
 export type FeedStatus = "LIVE" | "DELAYED" | "STALE" | "DEMO" | "REPLAY" | "UNAVAILABLE";
 
+/**
+ * Fundamental feed status as a pure decision so it can be unit-tested without a
+ * live vendor. `coreUnavailable` is true only after a completed load where both
+ * core endpoints (`earnings` + `income-statement`) failed — a premium quarterly
+ * analyst-estimates parameter alone does not demote a working feed.
+ */
+export function fundamentalFeedStatus(
+  provider: "mock" | "fmp",
+  apiKey: string | null,
+  coreUnavailable: boolean,
+): FeedStatus {
+  if (provider === "mock") return "DEMO";
+  if (!apiKey) return "UNAVAILABLE";
+  return coreUnavailable ? "UNAVAILABLE" : "LIVE";
+}
+
+/**
+ * News feed status as a pure decision. A vendor provider without credentials is
+ * `UNAVAILABLE`, never a silent mock substitution.
+ */
+export function newsFeedStatus(
+  provider: "mock" | "benzinga",
+  mode: "backfill" | "live",
+  apiKey: string | null,
+): FeedStatus {
+  if (provider === "mock") return mode === "backfill" ? "REPLAY" : "DEMO";
+  return apiKey ? "LIVE" : "UNAVAILABLE";
+}
+
 export function configuredFeedStatus(kind: "news" | "market" | "fundamental"): FeedStatus {
-  if (kind === "news") return config.newsProvider === "mock" ? config.newsMode === "backfill" ? "REPLAY" : "DEMO" : config.benzingaApiKey ? "LIVE" : "UNAVAILABLE";
+  if (kind === "news") return newsFeedStatus(config.newsProvider, config.newsMode, config.benzingaApiKey);
   if (kind === "market") return config.marketProvider === "mock" ? "DEMO" : config.massiveApiKey ? "DELAYED" : "UNAVAILABLE";
-  return config.fundamentalProvider === "mock" ? "DEMO" : config.fmpApiKey ? "LIVE" : "UNAVAILABLE";
+  return fundamentalFeedStatus(config.fundamentalProvider, config.fmpApiKey, fmpFundamentals.coreUnavailable());
 }
 
 export function feedProviderName(kind: "news" | "market" | "fundamental"): string {

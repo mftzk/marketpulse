@@ -128,6 +128,32 @@ The mock providers are selected through `lib/providers/index.ts`, a registry. Po
 vendor means implementing the same `NewsProvider` / `MarketDataProvider` / `FundamentalDataProvider`
 interfaces and registering them there — no caller changes.
 
+### Fundamental data on a free-tier FMP key
+
+`FUNDAMENTAL_PROVIDER=fmp` uses the `/stable` API. The adapter is deliberately fault-tolerant per
+endpoint — each request is independent and a vendor failure yields an empty result plus a recorded
+reason (`fmp_source_unavailable` log line), never a rejected pipeline tick.
+
+- **Primary consensus** comes from the `earnings` row (`epsEstimated` / `revenueEstimated`), which
+  exists on every plan. Analyst estimates are optional enrichment: `analyst-estimates?period=quarter`
+  is tried first and retried once with `period=annual` when the quarterly parameter is premium.
+- **Fiscal-period join** ties an `earnings` row to an `income-statement` row by announcement/filing
+  date (the live `earnings` payload has no `fiscalDateEnding`). A ±3 day tolerance absorbs
+  weekend/holiday shifts and `fiscalDateEnding`/`fiscalPeriodEnd` are honoured when present. A row
+  that cannot be tied to a statement is dropped — the fiscal period is never guessed.
+- **Budget** — `FMP_CACHE_TTL_MS` (default 12h) caches the per-ticker load in process. The universe
+  is 8 tickers × ≤3 endpoints = ≤24 calls per refresh (≈48/day at 12h), comfortably inside a
+  250-request/day free plan. A cached ticker makes zero additional vendor calls; a degraded result is
+  cached for at most 5 minutes so it can recover.
+- **Free-tier limits** — the free plan rejects `limit > 5` (HTTP 402), so the adapter requests
+  `limit=5`; `analyst-estimates?period=quarter`, intraday charts (`historical-chart/1min`), batch
+  quotes (`quote?symbol=A,B`) and `news/stock` also require a paid tier, and some symbols (e.g. the
+  ETF `SMH`) are not covered at all. Those slots stay on mock; the fundamental adapter degrades
+  gracefully.
+
+The market and news slots remain on their mocks (`MARKET_PROVIDER=mock`, `NEWS_PROVIDER=mock`) while
+FMP fundamentals run live.
+
 ---
 
 ## Authentication

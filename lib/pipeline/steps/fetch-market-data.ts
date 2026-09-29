@@ -203,8 +203,17 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
 
     // Fundamentals are pulled through their own provider contract and retain
     // explicit provider/status metadata. An unconfigured adapter returns no
-    // rows; it never substitutes demo values for a requested live feed.
-    await persistFundamentals(ctx, universe.map((s) => s.ticker));
+    // rows; it never substitutes demo values for a requested live feed. The
+    // vendor adapter is total, but this barrier guarantees a fundamental/vendor
+    // failure can never fail the whole market step (the tick continues on
+    // price/volume data alone).
+    try {
+      await persistFundamentals(ctx, universe.map((s) => s.ticker));
+    } catch (err) {
+      ctx.logger.warn("fundamental_persist_degraded", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     await advanceMacro(ctx);
 
     return {
