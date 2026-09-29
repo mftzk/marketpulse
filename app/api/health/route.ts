@@ -24,7 +24,11 @@ export async function GET(): Promise<Response> {
         database: { configured: false, ok: false, latency_ms: null },
         redis: { configured: false, ok: false },
         llm: { configured: false, model: "", last_success_at: null, last_failure_reason: null },
-        providers: { news: "mock", market: "mock", fundamental: "mock" },
+        providers: {
+          news: { provider: "unavailable", status: "UNAVAILABLE" },
+          market: { provider: "unavailable", status: "UNAVAILABLE" },
+          fundamental: { provider: "unavailable", status: "UNAVAILABLE" },
+        },
         pipeline: { last_run_at: null, last_status: null, last_duration_ms: null, runs_last_hour: 0, failed_jobs: 0 },
         counts: { events: 0, articles: 0, stocks: 0, sources: 0 },
       },

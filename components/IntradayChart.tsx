@@ -34,6 +34,19 @@ function nearestBarTime(barTimes: number[], target: number): number {
   return best;
 }
 
+function chartTimeToDate(time: Time): Date {
+  if (typeof time === "number") return new Date(time * 1000);
+  if (typeof time === "string") return new Date(`${time}T00:00:00Z`);
+  return new Date(Date.UTC(time.year, time.month - 1, time.day));
+}
+
+function formatChartTimeEt(time: Time, includeDate = false): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    ...(includeDate ? { month: "short", day: "2-digit" } : { hour: "2-digit", minute: "2-digit", hourCycle: "h23" as const }),
+  }).format(chartTimeToDate(time));
+}
+
 /**
  * Intraday candlestick chart with vertical event markers. `lightweight-charts`
  * is imported dynamically inside `useEffect` so the server build never touches
@@ -66,6 +79,7 @@ export function IntradayChart({ bars, markers = [], height = 360, ticker }: Intr
           localization: {
             locale: "en-US",
             priceFormatter: (price: number) => price.toFixed(2),
+            timeFormatter: (time: Time) => `${formatChartTimeEt(time, true)} ${formatChartTimeEt(time)} ET`,
           },
           layout: {
             background: { color: "transparent" },
@@ -78,7 +92,12 @@ export function IntradayChart({ bars, markers = [], height = 360, ticker }: Intr
             horzLines: { color: "#141d2c" },
           },
           rightPriceScale: { borderColor: "#1b2434" },
-          timeScale: { borderColor: "#1b2434", timeVisible: true, secondsVisible: false },
+          timeScale: {
+            borderColor: "#1b2434",
+            timeVisible: true,
+            secondsVisible: false,
+            tickMarkFormatter: (time: Time) => formatChartTimeEt(time),
+          },
           crosshair: { horzLine: { color: "#ffb000" }, vertLine: { color: "#ffb000" } },
         });
 
@@ -124,7 +143,7 @@ export function IntradayChart({ bars, markers = [], height = 360, ticker }: Intr
             // Only label higher-impact markers so dense days do not collide;
             // every marker still renders (shape/colour/tooltip remain intact).
             const label =
-              marker.impact_score >= 60
+              marker.impact_score !== null && marker.impact_score >= 60
                 ? `${marker.label} · ${marker.impact_score.toFixed(0)}`
                 : "";
             return {
@@ -176,6 +195,7 @@ export function IntradayChart({ bars, markers = [], height = 360, ticker }: Intr
   return (
     <div className="min-w-0">
       <div ref={containerRef} style={{ height }} className="w-full" aria-label={ticker ? `${ticker} intraday chart` : "intraday chart"} />
+      <div className="text-right text-[9px] uppercase tracking-wide text-muted">Chart times shown in ET</div>
       {failed ? (
         <p className="mt-1 text-[11px] text-muted">Chart failed to render.</p>
       ) : null}

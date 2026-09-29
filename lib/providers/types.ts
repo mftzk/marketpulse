@@ -22,13 +22,15 @@ export interface NewsSource {
 
 export interface NewsArticle {
   id: string;
-  sourceId: string;
+  /** Ingestion vendor, e.g. benzinga, or mock for explicit demo fixtures. */
   provider: string;
+  /** Actual publisher/source label used for tiering and quality scores. */
+  publisherSlug?: string | null;
   providerArticleId: string | null;
   url: string | null;
   headline: string;
   body: string | null;
-  publishedAt: Date;
+  publishedAt: Date | null;
   fetchedAt: Date;
   author: string | null;
   tickersRaw: string[];
@@ -70,9 +72,11 @@ export interface MarketSnapshot {
   gapPct: number | null;
   vwap: number | null;
   rvol: number | null;
-  cumulativeVolume: number;
-  intervalVolume: number;
+  cumulativeVolume: number | null;
+  intervalVolume: number | null;
   expectedVolumeToDate: number | null;
+  expectedSampleCount?: number;
+  comparisonSession?: string | null;
   prevClose: number | null;
   dayHigh: number | null;
   dayLow: number | null;
@@ -104,6 +108,8 @@ export interface FundamentalExpectation {
   unit: string | null;
   asOf: Date | null;
   source: string | null;
+  currency?: string | null;
+  epsType?: string | null;
 }
 
 export interface EarningsResult {
@@ -120,6 +126,12 @@ export interface EarningsResult {
   guidanceConsensus: number | null;
   guidanceSurprisePct: number | null;
   yoyRevenueGrowthPct: number | null;
+  epsUnit?: string | null;
+  epsCurrency?: string | null;
+  epsType?: string | null;
+  revenueUnit?: string | null;
+  revenueCurrency?: string | null;
+  consensusSource?: string | null;
 }
 
 export interface NewsProvider {

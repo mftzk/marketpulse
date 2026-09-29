@@ -7,7 +7,7 @@ import type { EventCardDTO, ListPage } from "@/lib/core/dto";
 import type { AlertEventDTO, AlertRuleDTO, WatchlistDTO } from "@/lib/core/detail";
 import { sessionFor } from "@/lib/core/session";
 import { COPY } from "@/lib/copy";
-import { formatAge, formatClockEt, formatPercent } from "@/lib/format";
+import { formatAge, formatClockEt, formatDate, formatPercent } from "@/lib/format";
 import type {
   DashboardFilters,
   EventsEnvelope,
@@ -172,6 +172,8 @@ export function DashboardView({
   const pipelineTick = liveHealth?.pipeline.last_run_at;
   const dbOk = liveHealth?.database.ok;
   const healthDot = dbOk === undefined ? "bg-hairline" : dbOk ? "bg-accent" : "bg-negative";
+  const feedStatuses = liveHealth?.providers;
+  const newsFeedStatus = feedStatuses?.news.status ?? "UNAVAILABLE";
 
   const header = (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border border-hairline bg-panel px-3 py-2">
@@ -179,14 +181,21 @@ export function DashboardView({
         <span className="text-[10px] uppercase tracking-wide text-muted">{COPY.dashboard.session}</span>
         <SessionPill session={session} />
       </span>
-      <span className="font-mono text-xs text-muted">{clock}</span>
+      <span className="font-mono text-xs text-muted">{now ? `${formatDate(now.toISOString())} ${clock}` : clock}</span>
       <span className="flex items-center gap-2 text-[11px] text-muted">
         <span className="text-[10px] uppercase tracking-wide">{COPY.dashboard.pipelineTick}</span>
         <span className={`inline-block h-1.5 w-1.5 rounded-full ${healthDot}`} />
-        <span>{pipelineTick ? formatClockEt(pipelineTick) : "—"}</span>
+        <span>{pipelineTick ? `${formatDate(pipelineTick)} ${formatClockEt(pipelineTick)}` : "—"}</span>
         {scheduler ? <span>· {scheduler.interval_seconds}s</span> : null}
       </span>
       <RegimeChip regime={liveContext?.regime ?? null} />
+      <div className="flex flex-wrap gap-1" aria-label="Feed status">
+        {feedStatuses ? Object.entries(feedStatuses).map(([name, feed]) => (
+          <span key={name} title={`${feed.provider} feed`} className="border border-hairline px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted">
+            {name} {feed.status}
+          </span>
+        )) : <span className="border border-hairline px-1.5 py-0.5 text-[9px] uppercase text-muted">feeds unavailable</span>}
+      </div>
       <div className="ml-auto">
         <MacroStrip indices={liveContext?.indices ?? []} />
       </div>
@@ -206,12 +215,17 @@ export function DashboardView({
               {COPY.common.stale}
             </span>
           ) : (
-            <span className="text-[10px] uppercase tracking-wide text-muted">{COPY.common.live}</span>
+            <span className="text-[10px] uppercase tracking-wide text-muted">news {newsFeedStatus}</span>
           )}
           <span className="font-mono text-[11px] text-muted">{page.total} total</span>
         </div>
       </div>
 
+      {loading && events.length > 0 ? (
+        <p role="status" aria-live="polite" className="border border-accent/40 bg-panel px-2 py-1 text-[11px] text-accent">
+          Updating results for the selected filters. The rows below are from the previous result set.
+        </p>
+      ) : null}
       {loading && events.length === 0 ? (
         <LoadingRows rows={5} />
       ) : failed && events.length === 0 ? (
@@ -219,7 +233,7 @@ export function DashboardView({
       ) : events.length === 0 ? (
         <EmptyState title="No events match these filters." body="Try widening the filters or resetting them." />
       ) : (
-        <div className="space-y-2">
+        <div className={`space-y-2 ${loading ? "opacity-50" : ""}`} aria-busy={loading}>
           {events.map((event) => (
             <EventCard key={event.id} event={event} />
           ))}

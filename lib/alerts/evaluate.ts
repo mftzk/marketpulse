@@ -10,8 +10,8 @@ import type { EventType } from "@/lib/core/event-types";
  */
 
 export interface AlertEventView {
-  impactScore: number;
-  newsAgeMinutes: number;
+  impactScore: number | null;
+  newsAgeMinutes: number | null;
   rvol: number | null;
   changePct: number | null;
   ticker: string | null;
@@ -38,19 +38,19 @@ export function evaluateRule(
   if (conditions.impact_score_gte !== undefined) {
     checks.push({
       key: "impact_score_gte",
-      passes: isFiniteNumber(event.impactScore) && event.impactScore >= conditions.impact_score_gte,
+      passes: event.impactScore !== null && isFiniteNumber(event.impactScore) && event.impactScore >= conditions.impact_score_gte,
     });
   }
   if (conditions.impact_score_lte !== undefined) {
     checks.push({
       key: "impact_score_lte",
-      passes: isFiniteNumber(event.impactScore) && event.impactScore <= conditions.impact_score_lte,
+      passes: event.impactScore !== null && isFiniteNumber(event.impactScore) && event.impactScore <= conditions.impact_score_lte,
     });
   }
   if (conditions.news_age_minutes_lt !== undefined) {
     checks.push({
       key: "news_age_minutes_lt",
-      passes: isFiniteNumber(event.newsAgeMinutes) && event.newsAgeMinutes < conditions.news_age_minutes_lt,
+      passes: event.newsAgeMinutes !== null && isFiniteNumber(event.newsAgeMinutes) && event.newsAgeMinutes < conditions.news_age_minutes_lt,
     });
   }
   if (conditions.rvol_gte !== undefined) {
@@ -69,6 +69,12 @@ export function evaluateRule(
     checks.push({
       key: "change_pct_lte",
       passes: event.changePct !== null && isFiniteNumber(event.changePct) && event.changePct <= conditions.change_pct_lte,
+    });
+  }
+  if (conditions.change_pct_abs_gte !== undefined) {
+    checks.push({
+      key: "change_pct_abs_gte",
+      passes: event.changePct !== null && isFiniteNumber(event.changePct) && Math.abs(event.changePct) >= conditions.change_pct_abs_gte,
     });
   }
   if (conditions.tickers !== undefined) {

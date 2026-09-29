@@ -13,9 +13,9 @@ export function num(value: string | number | null | undefined): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-export function qualityLabel(qualityScore: number | null): "high" | "medium" | "low" {
+export function qualityLabel(qualityScore: number | null): "high" | "medium" | "low" | null {
   if (qualityScore === null) {
-    return "medium";
+    return null;
   }
   if (qualityScore >= 0.85) {
     return "high";
@@ -59,9 +59,9 @@ export function sectorEtfView(
   return { symbol, change_pct: num(price?.changePctDaily ?? null) };
 }
 
-export function newsAgeMinutes(publishedAt: Date | string | null, now: Date): number {
+export function newsAgeMinutes(publishedAt: Date | string | null, now: Date): number | null {
   if (!publishedAt) {
-    return 0;
+    return null;
   }
   const ts = publishedAt instanceof Date ? publishedAt.getTime() : new Date(publishedAt).getTime();
   return Math.max(0, Math.floor((now.getTime() - ts) / 60_000));

@@ -156,8 +156,8 @@ export class MockNewsProvider implements NewsProvider {
         : 0;
 
     return this.toArticles(backfillArticles({ now: this.now }))
-      .filter((a) => a.publishedAt.getTime() >= sinceMs)
-      .sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
+      .filter((a) => (a.publishedAt ?? a.fetchedAt).getTime() >= sinceMs)
+      .sort((a, b) => (b.publishedAt ?? b.fetchedAt).getTime() - (a.publishedAt ?? a.fetchedAt).getTime());
   }
 
   private liveList(): NewsArticle[] {
@@ -170,8 +170,8 @@ export class MockNewsProvider implements NewsProvider {
       const publishedAt = new Date(now.getTime() - Math.floor(Math.random() * 10) * 60 * 1000);
       produced.push({
         id: `live-${now.getTime()}-${i}`,
-        sourceId: "source:reuters",
-        provider: "reuters",
+        provider: "mock",
+        publisherSlug: "reuters",
         providerArticleId: `live-${now.getTime()}-${i}`,
         url: null,
         headline: scenario.headline,
@@ -184,14 +184,14 @@ export class MockNewsProvider implements NewsProvider {
     }
 
     this.liveCache.push(...produced);
-    return produced.sort((a, b) => b.publishedAt.getTime() - a.publishedAt.getTime());
+    return produced.sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
   }
 
   private toArticles(raw: RawBackfillArticle[]): NewsArticle[] {
     return raw.map((a) => ({
       id: a.id,
-      sourceId: a.sourceId,
-      provider: a.provider,
+      provider: "mock",
+      publisherSlug: a.provider,
       providerArticleId: a.providerArticleId,
       url: a.url,
       headline: a.headline,

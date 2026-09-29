@@ -19,21 +19,21 @@ import {
 } from "@/lib/scoring/components";
 
 /**
- * Deterministic impact score (§6.1). `algorithm_version = "impact-v1"`.
+ * Deterministic impact score (§6.1). `algorithm_version = "impact-v2"`.
  *
  * Weights sum to 100. `points = round(normalized * weight * 10) / 10`;
  * `score = round(sum(points) * 10) / 10`, clamped 0..100.
  *
  * The score is computed by deterministic code — never by an LLM. Missing inputs
- * (e.g. no RVOL) normalize to 0 with an explanation of `"not available"`, and
- * the score is still produced so the UI can show the gap.
+ * are excluded from the denominator and remain null in the breakdown; a
+ * measured zero remains a valid input.
  */
 
-export const ALGORITHM_VERSION = "impact-v1";
+export const ALGORITHM_VERSION = "impact-v2";
 
 export interface ImpactInputs {
   /** Publication time (for freshness). */
-  publishedAt: Date;
+  publishedAt: Date | null;
   /** Reference "now" for freshness. */
   now: Date;
   /** Source quality score (0..1). */
@@ -57,8 +57,8 @@ export interface ImpactInputs {
 }
 
 export interface ImpactScoreResult {
-  score: number;
-  band: ImpactBand;
+  score: number | null;
+  band: ImpactBand | null;
   components: ImpactComponent[];
   algorithmVersion: string;
 }
@@ -88,7 +88,8 @@ function buildExplanation(
   }
   switch (key) {
     case "freshness": {
-      const age = Math.max(0, inputs.now.getTime() - inputs.publishedAt.getTime()) / 60_000;
+      const age = inputs.publishedAt ? Math.max(0, inputs.now.getTime() - inputs.publishedAt.getTime()) / 60_000 : null;
+      if (age === null) return "not available";
       return `published ${age < 1 ? "less than a minute ago" : `${Math.round(age)} minutes ago`}`;
     }
     case "source_quality":
@@ -112,71 +113,70 @@ function buildExplanation(
 
 interface NormalizedComponent {
   key: ImpactComponentKey;
-  raw: number;
-  normalized: number;
+  raw: number | null;
+  normalized: number | null;
   missing: boolean;
 }
 
 function normalizeComponents(inputs: ImpactInputs): NormalizedComponent[] {
-  const ageMinutes =
-    Math.max(0, inputs.now.getTime() - inputs.publishedAt.getTime()) / 60_000;
+  const ageMinutes = inputs.publishedAt === null
+    ? null
+    : Math.max(0, inputs.now.getTime() - inputs.publishedAt.getTime()) / 60_000;
 
-  const entries: { key: ImpactComponentKey; raw: number | null; normalized: number }[] = [
-    { key: "freshness", raw: ageMinutes, normalized: normalizeFreshness(ageMinutes) },
+  const entries: { key: ImpactComponentKey; raw: number | null; normalized: number | null }[] = [
+    { key: "freshness", raw: ageMinutes, normalized: ageMinutes === null ? null : normalizeFreshness(ageMinutes) },
     {
       key: "source_quality",
       raw: inputs.sourceQuality,
-      normalized: normalizeSourceQuality(inputs.sourceQuality),
+      normalized: inputs.sourceQuality === null ? null : normalizeSourceQuality(inputs.sourceQuality),
     },
     {
       key: "company_relevance",
       raw: inputs.companyRelevance,
-      normalized: normalizeCompanyRelevance(inputs.companyRelevance),
+      normalized: inputs.companyRelevance === null ? null : normalizeCompanyRelevance(inputs.companyRelevance),
     },
     {
       key: "event_importance",
       raw: inputs.eventImportance,
-      normalized: normalizeEventImportance(inputs.eventType, inputs.eventImportance),
+      normalized: inputs.eventImportance === null ? null : normalizeEventImportance(inputs.eventType, inputs.eventImportance),
     },
     {
       key: "surprise_magnitude",
       raw: inputs.weightedSurprisePct,
-      normalized: normalizeSurpriseMagnitude(
+      normalized: inputs.weightedSurprisePct === null ? null : normalizeSurpriseMagnitude(
         inputs.weightedSurprisePct === null ? null : Math.abs(inputs.weightedSurprisePct),
       ),
     },
     {
       key: "price_reaction",
       raw: inputs.priceReactionPct,
-      normalized: normalizePriceReaction(
+      normalized: inputs.priceReactionPct === null ? null : normalizePriceReaction(
         inputs.priceReactionPct === null ? null : Math.abs(inputs.priceReactionPct),
       ),
     },
     {
       key: "relative_volume",
       raw: inputs.rvol,
-      normalized: normalizeRelativeVolume(inputs.rvol),
+      normalized: inputs.rvol === null ? null : normalizeRelativeVolume(inputs.rvol),
     },
     {
       key: "relative_strength",
       raw: inputs.relativeStrengthPp,
-      normalized: normalizeRelativeStrength(
+      normalized: inputs.relativeStrengthPp === null ? null : normalizeRelativeStrength(
         inputs.relativeStrengthPp === null ? null : Math.abs(inputs.relativeStrengthPp),
       ),
     },
     {
       key: "sector_confirmation",
-      raw: inputs.etfMovePct,
-      normalized: normalizeSectorConfirmation(inputs.stockMovePct, inputs.etfMovePct),
+      raw: inputs.stockMovePct === null || inputs.etfMovePct === null ? null : inputs.etfMovePct,
+      normalized: inputs.stockMovePct === null || inputs.etfMovePct === null ? null : normalizeSectorConfirmation(inputs.stockMovePct, inputs.etfMovePct),
     },
   ];
 
-  return entries.map(({ key, raw, normalized }) => ({
-    key,
-    raw: raw === null || !Number.isFinite(raw) ? 0 : raw,
-    normalized,
-    missing: raw === null || !Number.isFinite(raw),
-  }));
+  return entries.map(({ key, raw, normalized }) => {
+    const missing = raw === null || !Number.isFinite(raw) || normalized === null || !Number.isFinite(normalized);
+    return { key, raw: missing ? null : raw, normalized: missing ? null : normalized, missing };
+  });
 }
 
 export function bandForScore(score: number): ImpactBand {
@@ -201,26 +201,30 @@ export function bandForScore(score: number): ImpactBand {
  */
 export function computeImpactScore(inputs: ImpactInputs): ImpactScoreResult {
   const normalized = normalizeComponents(inputs);
+  const availableWeight = normalized.reduce((sum, entry) => sum + (entry.missing ? 0 : COMPONENT_WEIGHTS[entry.key]), 0);
 
   const components: ImpactComponent[] = normalized.map((entry) => {
-    const weight = COMPONENT_WEIGHTS[entry.key];
+    const weight = entry.missing || availableWeight === 0 ? null : COMPONENT_WEIGHTS[entry.key] * 100 / availableWeight;
+    const points = entry.missing || weight === null || entry.normalized === null
+      ? null
+      : roundPoints(entry.normalized, weight);
     return {
       key: entry.key,
       label: COMPONENT_LABELS[entry.key],
       raw: entry.raw,
       normalized: entry.normalized,
       weight,
-      points: roundPoints(entry.normalized, weight),
+      points,
       explanation: buildExplanation(entry.key, inputs, entry.missing),
     };
   });
 
-  const sum = components.reduce((acc, c) => acc + c.points, 0);
-  const score = Math.max(0, Math.min(100, Math.round(sum * 10) / 10));
+  const sum = components.reduce((acc, c) => acc + (c.points ?? 0), 0);
+  const score = availableWeight === 0 ? null : Math.max(0, Math.min(100, Math.round(sum * 10) / 10));
 
   return {
     score,
-    band: bandForScore(score),
+    band: score === null ? null : bandForScore(score),
     components,
     algorithmVersion: ALGORITHM_VERSION,
   };

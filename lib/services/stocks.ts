@@ -1,6 +1,7 @@
 import { asc, desc, eq } from "drizzle-orm";
 
 import type { StockDTO } from "@/lib/core/detail";
+import { sessionFor } from "@/lib/core/session";
 import { getDb } from "@/lib/db/client";
 import {
   companies,
@@ -9,9 +10,8 @@ import {
   priceSnapshots,
   sectors,
   technicalSnapshots,
-  volumeSnapshots,
 } from "@/lib/db/schema";
-import { latestPriceSnapshots } from "@/lib/db/queries/market-data";
+import { latestPriceSnapshots, latestVolumeSnapshots } from "@/lib/db/queries/market-data";
 import { num } from "@/lib/services/shared";
 import { listEvents } from "@/lib/services/events";
 
@@ -37,7 +37,7 @@ export async function getStock(ticker: string): Promise<StockDTO | null> {
   }
 
   const price = (await db.select().from(priceSnapshots).where(eq(priceSnapshots.ticker, ticker)).orderBy(desc(priceSnapshots.ts)).limit(1))[0] ?? null;
-  const volume = (await db.select().from(volumeSnapshots).where(eq(volumeSnapshots.ticker, ticker)).orderBy(desc(volumeSnapshots.ts)).limit(1))[0] ?? null;
+  const volume = (await latestVolumeSnapshots(db, [ticker], sessionFor(new Date()))).get(ticker) ?? null;
   const technical = (await db.select().from(technicalSnapshots).where(eq(technicalSnapshots.ticker, ticker)).orderBy(desc(technicalSnapshots.ts)).limit(1))[0] ?? null;
 
   const lastPrice = num(price?.price);

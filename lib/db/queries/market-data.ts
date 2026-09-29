@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 
+import type { MarketSession } from "@/lib/core/session";
 import type { Db } from "@/lib/db/client";
 import { priceSnapshots, technicalSnapshots, volumeSnapshots } from "@/lib/db/schema";
 import { computeReaction, type ReactionResult, type ReactionSnapshot } from "@/lib/market/reaction";
@@ -505,15 +506,19 @@ export async function latestPriceSnapshots(
 export async function latestVolumeSnapshots(
   db: Db,
   tickers: string[],
+  currentSession?: MarketSession,
 ): Promise<Map<string, typeof volumeSnapshots.$inferSelect>> {
   const unique = [...new Set(tickers)].filter((t) => t.length > 0);
   if (unique.length === 0) {
     return new Map();
   }
+  const targetSession = currentSession === "closed" ? "regular" : currentSession;
   const rows = await db
     .selectDistinctOn([volumeSnapshots.ticker])
     .from(volumeSnapshots)
-    .where(inArray(volumeSnapshots.ticker, unique))
+    .where(targetSession
+      ? and(inArray(volumeSnapshots.ticker, unique), eq(volumeSnapshots.session, targetSession))
+      : inArray(volumeSnapshots.ticker, unique))
     .orderBy(asc(volumeSnapshots.ticker), desc(volumeSnapshots.ts));
   return latestSnapshotPerTicker(rows);
 }

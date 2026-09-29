@@ -1,5 +1,5 @@
 import type { WatchlistStockDTO } from "@/lib/core/detail";
-import { formatAge, formatPercent, formatPrice, formatRvol } from "@/lib/format";
+import { formatAge, formatClockEt, formatDate, formatNumberCompact, formatPercent, formatPrice, formatRvol } from "@/lib/format";
 import { bandForScore } from "@/lib/scoring/impact";
 
 import { MOVEMENT_TEXT, movementTone } from "./movement";
@@ -80,8 +80,9 @@ export function WatchlistTable({
                 <td className={`py-2 ${cellPad} text-right font-mono ${MOVEMENT_TEXT[tone]}`}>
                   {formatPercent(stock.change_pct)}
                 </td>
-                <td className={`py-2 ${cellPad} text-right font-mono text-muted`}>
-                  {formatRvol(stock.rvol)}
+                <td className={`py-2 ${cellPad} text-right font-mono text-muted`} title={`Session: ${stock.rvol_session ?? "unavailable"}; actual cumulative volume: ${formatNumberCompact(stock.rvol_volume)}; expected at same session time: ${formatNumberCompact(stock.rvol_expected_volume)} from ${stock.rvol_sample_count === null ? "unavailable" : `${stock.rvol_sample_count}/20`} matching sessions; measured: ${stock.rvol_as_of ? `${formatDate(stock.rvol_as_of)} ${formatClockEt(stock.rvol_as_of)}` : "unavailable"}; feed: ${stock.rvol_data_status}`}>
+                  <div>{formatRvol(stock.rvol, 1)}</div>
+                  {!rail ? <div className="text-[9px] leading-tight">{stock.rvol_session ?? "session —"} · {stock.rvol_sample_count === null ? "—/20" : `${stock.rvol_sample_count}/20`}</div> : null}
                 </td>
                 <td className={`min-w-0 overflow-hidden py-2 ${cellPad}`}>
                   <div className="truncate text-ink" title={catalyst}>

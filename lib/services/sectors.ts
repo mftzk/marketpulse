@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 
 import { getDb } from "@/lib/db/client";
+import { sessionFor } from "@/lib/core/session";
 import { latestEventByTicker } from "@/lib/db/queries/events";
 import { latestPriceSnapshots, latestVolumeSnapshots } from "@/lib/db/queries/market-data";
 import { companies, sectors } from "@/lib/db/schema";
@@ -24,7 +25,7 @@ export async function getSector(slug: string): Promise<Record<string, unknown> |
       ...companyTickers,
       ...(sector.etfSymbol ? [sector.etfSymbol] : []),
     ]),
-    latestVolumeSnapshots(db, companyTickers),
+    latestVolumeSnapshots(db, companyTickers, sessionFor(new Date())),
     latestEventByTicker(db, companyTickers),
   ]);
 

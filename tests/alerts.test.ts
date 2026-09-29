@@ -59,6 +59,18 @@ describe("evaluateRule", () => {
     expect(result.matches).toBe(false);
   });
 
+  it("distinguishes rising, falling, and absolute price movement", () => {
+    expect(evaluateRule({ change_pct_gte: 2 }, { ...EVENT, changePct: 3 }).matches).toBe(true);
+    expect(evaluateRule({ change_pct_gte: 2 }, { ...EVENT, changePct: -3 }).matches).toBe(false);
+    expect(evaluateRule({ change_pct_lte: -2 }, { ...EVENT, changePct: -3 }).matches).toBe(true);
+    expect(evaluateRule({ change_pct_abs_gte: 2 }, { ...EVENT, changePct: -3 }).matches).toBe(true);
+  });
+
+  it("does not treat an unavailable score as zero", () => {
+    expect(evaluateRule({ impact_score_gte: 0 }, { ...EVENT, impactScore: null }).matches).toBe(false);
+    expect(evaluateRule({ tickers: ["NVDA"] }, { ...EVENT, impactScore: null }).matches).toBe(true);
+  });
+
   it("matches news_age_minutes_lt", () => {
     expect(evaluateRule({ news_age_minutes_lt: 30 }, EVENT).matches).toBe(true);
     expect(evaluateRule({ news_age_minutes_lt: 5 }, EVENT).matches).toBe(false);

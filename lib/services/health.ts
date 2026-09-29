@@ -3,8 +3,9 @@ import { desc, sql } from "drizzle-orm";
 import { config } from "@/lib/config";
 import { getLlmHealth } from "@/lib/analysis/llm-client";
 import { getDb } from "@/lib/db/client";
-import { pipelineRuns } from "@/lib/db/schema";
+import { earningsResult, fundamentalExpectations, macroSnapshots, newsArticles, pipelineRuns, priceSnapshots } from "@/lib/db/schema";
 import { getSchedulerStatus } from "@/lib/pipeline/scheduler";
+import { feedProviderName, feedStatus, storedFeedStatus } from "@/lib/providers";
 
 const APP_VERSION = "1.0.0";
 
@@ -38,7 +39,7 @@ export async function getHealth(): Promise<Record<string, unknown>> {
   // One aggregate query replaces the four count(*) round-trips plus the
   // runs-last-hour / failed-jobs counts (phase 3c).
   const oneHourAgo = new Date(Date.now() - 60 * 60_000);
-  const [lastRun, statsRows] = await Promise.all([
+  const [lastRun, statsRows, newsLatest, marketLatest, expectationLatest, earningsLatest] = await Promise.all([
     db
       .select()
       .from(pipelineRuns)
@@ -54,8 +55,14 @@ export async function getHealth(): Promise<Record<string, unknown>> {
         (SELECT count(*)::int FROM pipeline_runs WHERE started_at >= ${oneHourAgo}) AS runs_last_hour,
         (SELECT count(*)::int FROM pipeline_jobs WHERE status = 'failed') AS failed_jobs
     `),
+    db.select({ ts: newsArticles.fetchedAt, status: newsArticles.dataStatus }).from(newsArticles).orderBy(desc(newsArticles.fetchedAt)).limit(1).then((r) => r[0] ?? null),
+    db.select({ ts: priceSnapshots.ts, status: priceSnapshots.dataStatus }).from(priceSnapshots).orderBy(desc(priceSnapshots.ts)).limit(1).then((r) => r[0] ?? null),
+    db.select({ ts: fundamentalExpectations.updatedAt, status: fundamentalExpectations.dataStatus }).from(fundamentalExpectations).orderBy(desc(fundamentalExpectations.updatedAt)).limit(1).then((r) => r[0] ?? null),
+    db.select({ ts: earningsResult.updatedAt, status: earningsResult.dataStatus }).from(earningsResult).orderBy(desc(earningsResult.updatedAt)).limit(1).then((r) => r[0] ?? null),
   ]);
   const stats = statsRows[0];
+  const fundamentalLatest = [expectationLatest, earningsLatest].filter((value): value is NonNullable<typeof value> => value !== null)
+    .sort((a, b) => b.ts.getTime() - a.ts.getTime())[0] ?? null;
 
   const counts = {
     events: stats?.events ?? 0,
@@ -86,9 +93,9 @@ export async function getHealth(): Promise<Record<string, unknown>> {
       last_failure_reason: llm.lastFailureReason,
     },
     providers: {
-      news: config.newsProvider,
-      market: config.marketProvider,
-      fundamental: config.fundamentalProvider,
+      news: { provider: feedProviderName("news"), status: newsLatest ? storedFeedStatus(newsLatest.status, newsLatest.ts, "news") : feedStatus("news") },
+      market: { provider: feedProviderName("market"), status: marketLatest ? storedFeedStatus(marketLatest.status, marketLatest.ts, "market") : feedStatus("market") },
+      fundamental: { provider: feedProviderName("fundamental"), status: fundamentalLatest ? storedFeedStatus(fundamentalLatest.status, fundamentalLatest.ts, "fundamental") : feedStatus("fundamental") },
     },
     pipeline: {
       last_run_at: lastRun?.startedAt?.toISOString() ?? null,

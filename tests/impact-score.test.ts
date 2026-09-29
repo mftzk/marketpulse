@@ -37,7 +37,7 @@ describe("impact score components", () => {
   });
 
   it("uses the documented algorithm version", () => {
-    expect(ALGORITHM_VERSION).toBe("impact-v1");
+    expect(ALGORITHM_VERSION).toBe("impact-v2");
   });
 
   it("computes band boundaries", () => {
@@ -75,7 +75,7 @@ describe("impact score components", () => {
 });
 
 describe("missing inputs", () => {
-  it("normalizes missing inputs to 0 with a 'not available' explanation", () => {
+  it("keeps missing inputs unavailable with a 'not available' explanation", () => {
     const result = computeImpactScore({
       ...baseInputs(),
       sourceQuality: null,
@@ -86,17 +86,18 @@ describe("missing inputs", () => {
       etfMovePct: null,
     });
     const rvol = result.components.find((c) => c.key === "relative_volume");
-    expect(rvol?.normalized).toBe(0);
+    expect(rvol?.normalized).toBeNull();
+    expect(rvol?.points).toBeNull();
     expect(rvol?.explanation).toBe("not available");
 
     const surprise = result.components.find((c) => c.key === "surprise_magnitude");
-    expect(surprise?.normalized).toBe(0);
+    expect(surprise?.normalized).toBeNull();
     expect(surprise?.explanation).toBe("not available");
   });
 
-  it("still produces a score when everything is missing", () => {
+  it("returns no score when every score input is unavailable", () => {
     const result = computeImpactScore({
-      publishedAt: NOW,
+      publishedAt: null,
       now: NOW,
       sourceQuality: null,
       companyRelevance: null,
@@ -109,7 +110,8 @@ describe("missing inputs", () => {
       stockMovePct: null,
       etfMovePct: null,
     });
-    expect(typeof result.score).toBe("number");
+    expect(result.score).toBeNull();
+    expect(result.band).toBeNull();
   });
 });
 

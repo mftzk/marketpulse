@@ -1,6 +1,7 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { classifyArticles } from "@/lib/analysis/classify";
+import { fiscalPeriodFromText } from "@/lib/analysis/fiscal-period";
 import { llmClient } from "@/lib/analysis/llm-client";
 import { newsArticles, newsSources } from "@/lib/db/schema";
 import type { PipelineContext } from "@/lib/pipeline/context";
@@ -26,6 +27,7 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
         tickersRaw: newsArticles.tickersRaw,
         publishedAt: newsArticles.publishedAt,
         fetchedAt: newsArticles.fetchedAt,
+        firstReceivedAt: newsArticles.firstReceivedAt,
         qualityScore: newsSources.qualityScore,
       })
       .from(newsArticles)
@@ -39,7 +41,7 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
         headline: row.headline,
         body: row.body,
         tickersRaw: row.tickersRaw ?? [],
-        sourceQuality: Number(row.qualityScore ?? 0.5),
+        sourceQuality: Number(row.qualityScore ?? 0),
       })),
       { llm: llmClient },
     );
@@ -60,11 +62,14 @@ export async function classifyEvent(ctx: PipelineContext): Promise<JobResult> {
         catalystDirection: c.catalyst_direction,
         companyRelevance: c.company_relevance,
         eventImportance: c.event_importance,
-        sourceQuality: c.source_quality,
+        sourceQuality: row.qualityScore === null ? null : Number(row.qualityScore),
         affectedTickers: c.affected_tickers,
         affectedSectors: c.affected_sectors,
         reasoning: c.reasoning,
-        publishedAt: row.publishedAt ?? row.fetchedAt ?? ctx.now,
+        publishedAt: row.publishedAt,
+        receivedAt: row.firstReceivedAt,
+        dedupeAt: row.publishedAt ?? row.firstReceivedAt,
+        fiscalPeriod: c.event_type === "EARNINGS" ? fiscalPeriodFromText(`${row.headline}\n${row.body ?? ""}`) : null,
         source: entry.source,
       });
     }

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import type { IntradayMarkerDTO } from "@/lib/core/detail";
 import { COPY } from "@/lib/copy";
-import { formatClockEt, formatScore } from "@/lib/format";
+import { formatClockEt, formatDate, formatScore } from "@/lib/format";
 import type { ReplayView as ReplayData } from "@/lib/view-types";
 
 import { EmptyState } from "./EmptyState";
@@ -66,6 +66,7 @@ export function ReplayView({ initialDate, initialData }: ReplayViewProps) {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-sm text-ink">{COPY.replay.title}</h1>
+        <span className="border border-hairline px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted">REPLAY</span>
         <label className="flex items-center gap-2 text-[11px] text-muted">
           {COPY.replay.date}
           <input
@@ -93,7 +94,7 @@ export function ReplayView({ initialDate, initialData }: ReplayViewProps) {
             <span>
               {revealed.length} / {data.timeline.length} events
             </span>
-            <span>{revealed.length > 0 ? formatClockEt(revealed[revealed.length - 1].ts ?? "") : "—"}</span>
+            <span>{revealed.length > 0 ? `${formatDate(revealed[revealed.length - 1].ts)} ${formatClockEt(revealed[revealed.length - 1].ts)}` : "—"}</span>
           </div>
           {data.session_windows.length > 0 ? (
             <div className="flex gap-2 text-[10px] uppercase tracking-wide text-muted">
@@ -145,7 +146,7 @@ export function ReplayView({ initialDate, initialData }: ReplayViewProps) {
                   <li key={`${item.event_id}-${item.ts}`} className="border border-hairline p-2">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-mono text-[11px] text-muted">
-                        {formatClockEt(item.ts ?? "")}
+                        {formatDate(item.ts)} {formatClockEt(item.ts)}
                       </span>
                       <span className="font-mono text-[11px] text-ink">
                         {formatScore(item.impact_score)}

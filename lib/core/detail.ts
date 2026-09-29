@@ -10,9 +10,14 @@ import type { MarketSession } from "@/lib/core/session";
 export interface SourceDTO {
   title: string;
   url: string | null;
-  source_name: string;
-  tier: number;
-  published_at: string;
+  source_name: string | null;
+  tier: number | null;
+  quality_score: number | null;
+  ingest_provider: string | null;
+  published_at: string | null;
+  received_at: string;
+  excerpt: string | null;
+  is_new_information: boolean;
   is_primary: boolean;
 }
 
@@ -33,11 +38,14 @@ export interface TechnicalDTO {
 }
 
 export interface MacroValueDTO {
-  value: number;
+  value: number | null;
   previous: number | null;
   change: number | null;
   unit: string | null;
-  as_of: string;
+  as_of: string | null;
+  reference_price?: number | null;
+  reference_period?: string | null;
+  data_status?: string;
 }
 
 export interface IntradayBarDTO {
@@ -53,7 +61,7 @@ export interface IntradayMarkerDTO {
   time: number;
   label: string;
   event_id: string;
-  impact_score: number;
+  impact_score: number | null;
   catalyst_direction: CatalystDirection | null;
 }
 
@@ -65,12 +73,13 @@ export interface EventDetailDTO {
     event_type_label: string;
     catalyst_direction: CatalystDirection | null;
     sentiment: number;
-    published_at: string;
+  published_at: string | null;
+  received_at: string;
     session: MarketSession | null;
     ticker: string | null;
     company_name: string | null;
     sector: string | null;
-    source: { name: string; tier: number; quality_label: "high" | "medium" | "low" } | null;
+    source: { name: string | null; tier: number | null; quality_score: number | null; quality_label: "high" | "medium" | "low" | null; ingest_provider: string | null } | null;
     article_count: number;
   };
   what_happened: string;
@@ -81,6 +90,14 @@ export interface EventDetailDTO {
     guidance_surprise_pct: number | null;
     expected: Record<string, number | null>;
     actual: Record<string, number | null>;
+    fiscal_period: string | null;
+    reported_at: string | null;
+    units: { eps: string | null; revenue: string | null };
+    currencies: { eps: string | null; revenue: string | null };
+    eps_type: string | null;
+    consensus_source: string | null;
+    provider: string | null;
+    data_status: string;
     note: string;
   };
   price_reaction: {
@@ -104,6 +121,10 @@ export interface EventDetailDTO {
     expected_to_date: number | null;
     rvol: number | null;
     profile: string;
+    session: string | null;
+    as_of: string | null;
+    sample_count: number | null;
+    data_status: string;
   };
   sector_reaction: {
     sector_etf: string | null;
@@ -130,6 +151,7 @@ export interface EventDetailDTO {
   timeline: { ts: string; label: string; kind: string }[];
   sources: SourceDTO[];
   impact_breakdown: ImpactComponentDTO[];
+  impact_score: { current: number | null; computed_at: string | null; initial: number | null; initial_computed_at: string | null };
   intraday: { bars: IntradayBarDTO[]; markers: IntradayMarkerDTO[] };
 }
 
@@ -139,6 +161,12 @@ export interface WatchlistStockDTO {
   price: number | null;
   change_pct: number | null;
   rvol: number | null;
+  rvol_as_of: string | null;
+  rvol_session: string | null;
+  rvol_volume: number | null;
+  rvol_expected_volume: number | null;
+  rvol_sample_count: number | null;
+  rvol_data_status: string;
   latest_catalyst: string | null;
   catalyst_age_minutes: number | null;
   impact_score: number | null;
@@ -174,6 +202,7 @@ export interface AlertEventDTO {
   body: string | null;
   delivered_channels: string[];
   status: "pending" | "delivered" | "failed";
+  material_reason: string | null;
 }
 
 export interface StockDTO {

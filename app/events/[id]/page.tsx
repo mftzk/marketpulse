@@ -17,6 +17,8 @@ import { Timeline } from "@/components/Timeline";
 import { COPY } from "@/lib/copy";
 import {
   formatAge,
+  formatClockEt,
+  formatDate,
   formatNumberCompact,
   formatPercent,
   formatPrice,
@@ -39,6 +41,10 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: stri
 
 function SectionPanel({ title, children }: { title: string; children: React.ReactNode }) {
   return <Panel title={title}>{children}</Panel>;
+}
+
+function formatFundamental(value: number | null): string {
+  return value === null ? "—" : new Intl.NumberFormat("en-US", { maximumFractionDigits: 6 }).format(value);
 }
 
 export default async function EventDetailPage({
@@ -86,6 +92,11 @@ export default async function EventDetailPage({
             <h1 className="mt-2 max-w-4xl text-lg leading-snug text-ink">
               {detail.overview.headline}
             </h1>
+            {detail.expectation_vs_actual.note.startsWith("Guidance claim is unverified") ? (
+              <p className="mt-1 inline-block border border-negative px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-negative">
+                Guidance claim unverified
+              </p>
+            ) : null}
             <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-muted">
               <span className="text-ink">{detail.overview.event_type_label}</span>
               <CatalystPill direction={detail.overview.catalyst_direction ?? "neutral"} />
@@ -97,12 +108,14 @@ export default async function EventDetailPage({
                 </span>
               </span>
               <SessionPill session={detail.overview.session} />
-              <span className="font-mono">{formatAge(event.news_age_minutes)}</span>
+              <span className="font-mono">{event.published_at ? `published ${formatDate(event.published_at)} ${formatClockEt(event.published_at)} · ${formatAge(event.news_age_minutes)}` : `published time unavailable · received ${formatDate(detail.overview.received_at)} ${formatClockEt(detail.overview.received_at)}`}</span>
               {detail.overview.source ? (
                 <SourceBadge
                   name={detail.overview.source.name}
                   tier={detail.overview.source.tier}
+                  qualityScore={detail.overview.source.quality_score}
                   qualityLabel={detail.overview.source.quality_label}
+                  ingestProvider={detail.overview.source.ingest_provider}
                 />
               ) : null}
             </div>
@@ -116,6 +129,7 @@ export default async function EventDetailPage({
             />
           </div>
         </div>
+        <p className="mt-2 text-[11px] text-muted">Impact {formatPrice(event.impact.score, 1)} is an event-impact score, not a probability of a price rise. Catalyst direction describes the event; price reaction is measured separately.</p>
       </Panel>
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -140,24 +154,31 @@ export default async function EventDetailPage({
             <div>
               <div className="text-[10px] uppercase tracking-wide text-muted">{COPY.detail.expected}</div>
               <div className="mt-1 space-y-1 font-mono text-xs text-muted">
-                <div>{formatPrice(detail.expectation_vs_actual.expected.eps)}</div>
-                <div>{formatPrice(detail.expectation_vs_actual.expected.revenue, 0)}</div>
-                <div>{formatPrice(detail.expectation_vs_actual.expected.guidance)}</div>
+                <div>{formatFundamental(detail.expectation_vs_actual.expected.eps)}</div>
+                <div>{formatFundamental(detail.expectation_vs_actual.expected.revenue)}</div>
+                <div>{formatFundamental(detail.expectation_vs_actual.expected.guidance)}</div>
               </div>
             </div>
             <div>
               <div className="text-[10px] uppercase tracking-wide text-muted">{COPY.detail.actual}</div>
               <div className="mt-1 space-y-1 font-mono text-xs text-ink">
-                <div>{formatPrice(detail.expectation_vs_actual.actual.eps)}</div>
-                <div>{formatPrice(detail.expectation_vs_actual.actual.revenue, 0)}</div>
-                <div>{formatPrice(detail.expectation_vs_actual.actual.guidance)}</div>
+                <div>{formatFundamental(detail.expectation_vs_actual.actual.eps)}</div>
+                <div>{formatFundamental(detail.expectation_vs_actual.actual.revenue)}</div>
+                <div>{formatFundamental(detail.expectation_vs_actual.actual.guidance)}</div>
               </div>
             </div>
           </div>
           <div className="mt-3 space-y-1">
-            <Row label="EPS surprise" value={formatPercent(detail.expectation_vs_actual.eps_surprise_pct)} />
-            <Row label="Revenue surprise" value={formatPercent(detail.expectation_vs_actual.revenue_surprise_pct)} />
-            <Row label="Guidance surprise" value={formatPercent(detail.expectation_vs_actual.guidance_surprise_pct)} />
+            <Row label="EPS surprise" value={formatPercent(detail.expectation_vs_actual.eps_surprise_pct, 3)} />
+            <Row label="Revenue surprise" value={formatPercent(detail.expectation_vs_actual.revenue_surprise_pct, 3)} />
+            <Row label="Guidance surprise" value={formatPercent(detail.expectation_vs_actual.guidance_surprise_pct, 3)} />
+            <Row label="Fiscal period" value={detail.expectation_vs_actual.fiscal_period ?? "unavailable"} />
+            <Row label="EPS type" value={detail.expectation_vs_actual.eps_type ?? "unavailable"} />
+            <Row label="Consensus source" value={detail.expectation_vs_actual.consensus_source ?? "unavailable"} />
+            <Row label="Fundamental feed" value={`${detail.expectation_vs_actual.provider ?? "unavailable"} · ${detail.expectation_vs_actual.data_status}`} />
+            <Row label="EPS unit / currency" value={[detail.expectation_vs_actual.units.eps, detail.expectation_vs_actual.currencies.eps].filter(Boolean).join(" · ") || "unavailable"} />
+            <Row label="Revenue unit / currency" value={[detail.expectation_vs_actual.units.revenue, detail.expectation_vs_actual.currencies.revenue].filter(Boolean).join(" · ") || "unavailable"} />
+            <Row label="Reported at" value={detail.expectation_vs_actual.reported_at ? `${formatDate(detail.expectation_vs_actual.reported_at)} ${formatClockEt(detail.expectation_vs_actual.reported_at)}` : "unavailable"} />
           </div>
           <p className="mt-2 text-[11px] text-muted">{detail.expectation_vs_actual.note}</p>
         </SectionPanel>
@@ -186,6 +207,10 @@ export default async function EventDetailPage({
           <Row label={COPY.detail.expectedToDate} value={formatNumberCompact(detail.volume_reaction.expected_to_date)} />
           <Row label={COPY.detail.rvol} value={formatRvol(detail.volume_reaction.rvol)} />
           <Row label={COPY.detail.profile} value={detail.volume_reaction.profile} />
+          <Row label="Session" value={detail.volume_reaction.session ?? "unavailable"} />
+          <Row label="Historical sessions compared" value={detail.volume_reaction.sample_count?.toString() ?? "unavailable"} />
+          <Row label="RVOL measured at" value={detail.volume_reaction.as_of ? `${formatDate(detail.volume_reaction.as_of)} ${formatClockEt(detail.volume_reaction.as_of)}` : "unavailable"} />
+          <Row label="Feed" value={detail.volume_reaction.data_status} />
         </SectionPanel>
 
         <SectionPanel title={COPY.detail.sectorReaction}>
@@ -305,6 +330,9 @@ export default async function EventDetailPage({
           <ImpactBreakdown
             components={detail.impact_breakdown}
             algorithmVersion={event.impact.algorithm_version}
+            computedAt={detail.impact_score.computed_at}
+            initialScore={detail.impact_score.initial}
+            initialComputedAt={detail.impact_score.initial_computed_at}
           />
         </SectionPanel>
       </div>

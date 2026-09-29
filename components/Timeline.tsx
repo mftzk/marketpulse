@@ -1,4 +1,4 @@
-import { formatClockEt } from "@/lib/format";
+import { formatClockEt, formatDate } from "@/lib/format";
 
 export interface TimelineItem {
   ts: string;
@@ -22,7 +22,7 @@ export function Timeline({ items }: TimelineProps) {
             className="absolute -left-[21px] top-1.5 inline-block h-2 w-2 bg-accent"
             aria-hidden="true"
           />
-          <div className="font-mono text-[11px] text-muted">{formatClockEt(item.ts)}</div>
+          <div className="font-mono text-[11px] text-muted">{formatDate(item.ts)} {formatClockEt(item.ts)}</div>
           <div className="text-xs text-ink">{item.label}</div>
           <div className="text-[10px] uppercase tracking-wide text-muted">{item.kind}</div>
         </li>

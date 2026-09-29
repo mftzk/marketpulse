@@ -3,58 +3,31 @@ import { describe, expect, it } from "vitest";
 import {
   computeRvol,
   expectedVolumeToTime,
-  volumeProfileFraction,
+  matchedSessionRvol,
   type SessionVolumePoint,
 } from "@/lib/market/rvol";
+
+import type { MarketSession } from "@/lib/core/session";
 
 function session(points: Array<[number, number]>): SessionVolumePoint[] {
   return points.map(([elapsedMinutes, cumulativeVolume]) => ({ elapsedMinutes, cumulativeVolume }));
 }
 
-describe("volumeProfileFraction", () => {
-  it("rises quickly at the open (~13% in the first 30 minutes)", () => {
-    expect(volumeProfileFraction(0)).toBe(0);
-    expect(volumeProfileFraction(30)).toBeCloseTo(0.13);
-  });
-
-  it("ramps into the close", () => {
-    expect(volumeProfileFraction(390)).toBeCloseTo(0.95);
-    expect(volumeProfileFraction(9999)).toBe(1);
-  });
-
-  it("is monotonic over the session", () => {
-    let prev = volumeProfileFraction(0);
-    for (let m = 5; m <= 390; m += 15) {
-      const curr = volumeProfileFraction(m);
-      expect(curr).toBeGreaterThanOrEqual(prev);
-      prev = curr;
-    }
-  });
-});
-
 describe("expectedVolumeToTime", () => {
   it("averages cumulative volume at the same elapsed minute across sessions", () => {
-    const history = [
-      session([[10, 100], [20, 200], [30, 350]]),
-      session([[10, 120], [20, 240], [30, 400]]),
-    ];
-    // elapsed 30 → mean(350, 400) = 375
-    expect(expectedVolumeToTime({ history, prevSessionFullVolume: 5000, elapsedMinutes: 30 })).toBeCloseTo(375);
+    const history = Array.from({ length: 20 }, (_, index) => session([[10, 100 + index], [20, 200 + index], [30, 350 + index]]));
+    // elapsed 30 → mean(350..369) = 359.5
+    expect(expectedVolumeToTime({ history, elapsedMinutes: 30 })).toBeCloseTo(359.5);
   });
 
   it("interpolates between points when exact minute is missing", () => {
-    const history = [session([[0, 0], [60, 600]])];
+    const history = Array.from({ length: 20 }, () => session([[0, 0], [60, 600]]));
     // elapsed 30 → linear between 0 and 600 → 300
-    expect(expectedVolumeToTime({ history, prevSessionFullVolume: 6000, elapsedMinutes: 30 })).toBeCloseTo(300);
+    expect(expectedVolumeToTime({ history, elapsedMinutes: 30 })).toBeCloseTo(300);
   });
 
-  it("falls back to the volume profile when no history is present", () => {
-    const expected = expectedVolumeToTime({ history: [], prevSessionFullVolume: 1000, elapsedMinutes: 30 });
-    expect(expected).toBeCloseTo(1000 * volumeProfileFraction(30));
-  });
-
-  it("returns null when no history and no previous session volume", () => {
-    expect(expectedVolumeToTime({ history: [], prevSessionFullVolume: null, elapsedMinutes: 30 })).toBeNull();
+  it("returns unavailable when 20 matching sessions are not present", () => {
+    expect(expectedVolumeToTime({ history: [session([[30, 100]])], elapsedMinutes: 30 })).toBeNull();
   });
 });
 
@@ -69,17 +42,69 @@ describe("computeRvol", () => {
     expect(computeRvol(500, 0)).toBeNull();
   });
 
-  it("stays in a realistic band for synthetic profile-based volume series", () => {
-    const adv = 40_000_000;
-    const factors = [0.3, 0.45, 0.8, 1, 1.4, 2, 2.7, 3];
-    for (const factor of factors) {
-      for (const elapsed of [30, 60, 120, 240, 360]) {
-        const expected = adv * volumeProfileFraction(elapsed);
-        const rvol = computeRvol(expected * factor, expected);
-        expect(rvol).not.toBeNull();
-        expect(rvol as number).toBeGreaterThanOrEqual(0.3);
-        expect(rvol as number).toBeLessThanOrEqual(3);
-      }
-    }
+});
+
+function matchedBars(targetDate: string, session: Exclude<MarketSession, "closed">, priorCount: number, targetVolumes = [150, 150]) {
+  const starts = { pre_market: "09:00:00Z", regular: "14:30:00Z", after_hours: "21:00:00Z" };
+  const target = new Date(`${targetDate}T${starts[session]}`);
+  const dates: Date[] = [];
+  for (let offset = 1; dates.length < priorCount; offset += 1) {
+    const date = new Date(target.getTime() - offset * 86_400_000);
+    if (date.getUTCDay() !== 0 && date.getUTCDay() !== 6) dates.push(date);
+  }
+  const bars = dates.flatMap((date) => {
+    const start = new Date(`${date.toISOString().slice(0, 10)}T${starts[session]}`);
+    return [0, 30].map((minutes) => ({ time: Math.floor((start.getTime() + minutes * 60_000) / 1000), volume: 100 }));
+  });
+  const current = [0, 30].map((minutes, index) => ({
+    time: Math.floor((target.getTime() + minutes * 60_000) / 1000),
+    volume: targetVolumes[index] ?? 0,
+  }));
+  return { bars: [...bars, ...current], current };
+}
+
+describe("matched-session RVOL", () => {
+  it.each(["regular", "pre_market", "after_hours"] as const)("compares %s activity with 20 matching sessions at the same elapsed time", (sessionName) => {
+    const { bars, current } = matchedBars("2026-02-02", sessionName, 20);
+    const now = new Date(current[1].time * 1000);
+    const result = matchedSessionRvol(bars, now, 20).get(current[1].time);
+    expect(result?.session).toBe(sessionName);
+    expect(result?.expectedSampleCount).toBe(20);
+    expect(result?.expectedVolume).toBe(200);
+    expect(result?.cumulativeVolume).toBe(300);
+    expect(result?.rvol).toBe(1.5);
+  });
+
+  it("keeps a measured zero distinct from missing volume", () => {
+    const { bars, current } = matchedBars("2026-02-02", "regular", 20, [0, 0]);
+    const result = matchedSessionRvol(bars, new Date(current[1].time * 1000), 20).get(current[1].time);
+    expect(result?.rvol).toBe(0);
+    expect(result?.cumulativeVolume).toBe(0);
+  });
+
+  it("leaves the value unavailable when fewer than 20 comparator sessions exist", () => {
+    const { bars, current } = matchedBars("2026-02-02", "regular", 19);
+    const result = matchedSessionRvol(bars, new Date(current[1].time * 1000), 20).get(current[1].time);
+    expect(result?.expectedSampleCount).toBe(19);
+    expect(result?.expectedVolume).toBeNull();
+    expect(result?.rvol).toBeNull();
+  });
+
+  it("uses the most recent regular session when the market is closed", () => {
+    const { bars } = matchedBars("2026-02-06", "regular", 20);
+    const now = new Date("2026-02-07T18:00:00Z");
+    const result = [...matchedSessionRvol(bars, now, 20).values()].at(-1);
+    expect(result?.session).toBe("regular");
+    expect(result?.asOf.toISOString()).toContain("2026-02-06T15:00:00");
+  });
+
+  it("does not use prior-day bars as a live value when the current session is stale", () => {
+    const { bars } = matchedBars("2026-02-02", "regular", 20);
+    expect(matchedSessionRvol(bars, new Date("2026-02-03T15:00:00Z"), 20).size).toBe(0);
+  });
+
+  it("marks a same-day intraday value unavailable when its latest bar is stale", () => {
+    const { bars } = matchedBars("2026-02-02", "regular", 20);
+    expect(matchedSessionRvol(bars, new Date("2026-02-02T15:30:00Z"), 20).size).toBe(0);
   });
 });

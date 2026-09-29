@@ -1,8 +1,8 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { etWallClock, sessionFor } from "@/lib/core/session";
 import { computeConditions, computeTechnicals } from "@/lib/market/technical";
-import { volumeProfileFraction } from "@/lib/market/rvol";
+import { matchedSessionRvol, type SessionRvolPoint } from "@/lib/market/rvol";
 import {
   MACRO_LEVEL_TRACKING,
   deriveMacroChange,
@@ -10,7 +10,8 @@ import {
   macroLevelFromEtf,
 } from "@/lib/market/macro";
 import { BROAD_BENCHMARKS, SECTOR_ETF_BY_SLUG } from "@/lib/market/relative-strength";
-import { macroSnapshots, priceSnapshots, sectors, stocks, technicalSnapshots, volumeSnapshots } from "@/lib/db/schema";
+import { earningsResult, fundamentalExpectations, macroSnapshots, marketEvents, priceSnapshots, sectors, stocks, technicalSnapshots, volumeSnapshots } from "@/lib/db/schema";
+import { configuredFeedStatus } from "@/lib/providers";
 import type { Bar, DailyStats } from "@/lib/providers/types";
 import type { PipelineContext } from "@/lib/pipeline/context";
 import type { JobResult } from "@/lib/pipeline/registry";
@@ -73,15 +74,21 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
       if (!snapshot) {
         continue;
       }
-      const stats = await ctx.providers.market.dailyStats(ticker, ctx.now);
-      if (!stats) {
+      const dailyStats = await ctx.providers.market.dailyStats(ticker, ctx.now);
+      if (!dailyStats) {
         continue;
       }
-      const minuteBars = await ctx.providers.market.bars(ticker, {
-        from: windowStart,
+      // The provider snapshot's prior regular close is the authoritative daily
+      // reference, especially before today's daily aggregate bar exists.
+      const stats = snapshot.prevClose === null ? dailyStats : { ...dailyStats, prevClose: snapshot.prevClose };
+      const historicalBars = await ctx.providers.market.bars(ticker, {
+        from: new Date(ctx.now.getTime() - 50 * 24 * 60 * 60_000),
         to: ctx.now,
         intervalMinutes: 1,
       });
+      const minuteBars = historicalBars.filter((bar) => bar.time * 1000 >= windowStart.getTime());
+      const rvolByTime = matchedSessionRvol(historicalBars, ctx.now, 20);
+      const latestRvol = [...rvolByTime.values()].sort((a, b) => b.asOf.getTime() - a.asOf.getTime())[0] ?? null;
       const sessionVwap = computeTechnicals(minuteBars).vwap;
       const dailyBars = await ctx.providers.market.dailyBars(ticker, 60, ctx.now);
       const dailyTechnicals = computeTechnicals(dailyBars);
@@ -95,11 +102,11 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
         vwap: sessionVwap,
         prevDayHigh: stats.prevDayHigh,
         prevDayLow: stats.prevDayLow,
-        rvol: snapshot.rvol,
+        rvol: latestRvol?.rvol ?? null,
         gapPct,
       });
 
-      await persistMinuteSeries(ctx, ticker, minuteBars, stats, sessionVwap);
+      await persistMinuteSeries(ctx, ticker, minuteBars, stats, sessionVwap, rvolByTime);
 
       await ctx.db
         .insert(technicalSnapshots)
@@ -123,6 +130,81 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
         .onConflictDoNothing();
 
       processed += 1;
+    }
+
+    // Fundamentals are pulled through their own provider contract and retain
+    // explicit provider/status metadata. An unconfigured adapter returns no
+    // rows; it never substitutes demo values for a requested live feed.
+    for (const { ticker } of universe) {
+      const [expectations, earnings] = await Promise.all([
+        ctx.providers.fundamental.expectations(ticker),
+        ctx.providers.fundamental.earnings(ticker),
+      ]);
+      for (const item of expectations) {
+        await ctx.db.insert(fundamentalExpectations).values({
+          ticker: item.ticker,
+          fiscalPeriod: item.fiscalPeriod,
+          metric: item.metric,
+          consensus: String(item.consensus),
+          unit: item.unit,
+          asOf: item.asOf,
+          source: item.source,
+          currency: item.currency ?? null,
+          epsType: item.epsType ?? null,
+          provider: ctx.config.fundamentalProvider,
+          dataStatus: configuredFeedStatus("fundamental"),
+          updatedAt: ctx.now,
+        }).onConflictDoUpdate({
+          target: [fundamentalExpectations.ticker, fundamentalExpectations.fiscalPeriod, fundamentalExpectations.metric],
+          set: {
+            consensus: sql`excluded.consensus`, unit: sql`excluded.unit`, asOf: sql`excluded.as_of`,
+            source: sql`excluded.source`, currency: sql`excluded.currency`, epsType: sql`excluded.eps_type`,
+            provider: sql`excluded.provider`, dataStatus: sql`excluded.data_status`, updatedAt: ctx.now,
+          },
+        });
+      }
+      for (const item of earnings) {
+        const matchingEvent = await ctx.db.select({ id: marketEvents.id }).from(marketEvents).where(sql`
+          ${marketEvents.ticker} = ${ticker} AND ${marketEvents.eventType} = 'EARNINGS'
+          AND ${marketEvents.fiscalPeriod} = ${item.fiscalPeriod}
+        `).orderBy(desc(marketEvents.publishedAt)).limit(1);
+        await ctx.db.insert(earningsResult).values({
+          ticker: item.ticker,
+          eventId: matchingEvent[0]?.id ?? null,
+          fiscalPeriod: item.fiscalPeriod,
+          reportedAt: item.reportedAt,
+          epsActual: item.epsActual === null ? null : String(item.epsActual),
+          epsConsensus: item.epsConsensus === null ? null : String(item.epsConsensus),
+          epsSurprisePct: item.epsSurprisePct === null ? null : String(item.epsSurprisePct),
+          revenueActual: item.revenueActual === null ? null : String(item.revenueActual),
+          revenueConsensus: item.revenueConsensus === null ? null : String(item.revenueConsensus),
+          revenueSurprisePct: item.revenueSurprisePct === null ? null : String(item.revenueSurprisePct),
+          guidanceActual: item.guidanceActual === null ? null : String(item.guidanceActual),
+          guidanceConsensus: item.guidanceConsensus === null ? null : String(item.guidanceConsensus),
+          guidanceSurprisePct: item.guidanceSurprisePct === null ? null : String(item.guidanceSurprisePct),
+          yoyRevenueGrowthPct: item.yoyRevenueGrowthPct === null ? null : String(item.yoyRevenueGrowthPct),
+          epsUnit: item.epsUnit ?? null,
+          epsCurrency: item.epsCurrency ?? null,
+          epsType: item.epsType ?? null,
+          revenueUnit: item.revenueUnit ?? null,
+          revenueCurrency: item.revenueCurrency ?? null,
+          consensusSource: item.consensusSource ?? null,
+          provider: ctx.config.fundamentalProvider,
+          dataStatus: configuredFeedStatus("fundamental"),
+          updatedAt: ctx.now,
+        }).onConflictDoUpdate({
+          target: [earningsResult.ticker, earningsResult.fiscalPeriod],
+          set: {
+            eventId: sql`excluded.event_id`, reportedAt: sql`excluded.reported_at`,
+            epsActual: sql`excluded.eps_actual`, epsConsensus: sql`excluded.eps_consensus`, epsSurprisePct: sql`excluded.eps_surprise_pct`,
+            revenueActual: sql`excluded.revenue_actual`, revenueConsensus: sql`excluded.revenue_consensus`, revenueSurprisePct: sql`excluded.revenue_surprise_pct`,
+            guidanceActual: sql`excluded.guidance_actual`, guidanceConsensus: sql`excluded.guidance_consensus`, guidanceSurprisePct: sql`excluded.guidance_surprise_pct`,
+            yoyRevenueGrowthPct: sql`excluded.yoy_revenue_growth_pct`, epsUnit: sql`excluded.eps_unit`, epsCurrency: sql`excluded.eps_currency`,
+            epsType: sql`excluded.eps_type`, revenueUnit: sql`excluded.revenue_unit`, revenueCurrency: sql`excluded.revenue_currency`,
+            consensusSource: sql`excluded.consensus_source`, provider: sql`excluded.provider`, dataStatus: sql`excluded.data_status`, updatedAt: ctx.now,
+          },
+        });
+      }
     }
 
     await advanceMacro(ctx);
@@ -162,7 +244,8 @@ function snapshotWindowStart(now: Date): Date {
 /**
  * Persists the provider's one-minute price and volume series (the same series
  * the event chart renders), upserting by `(ticker, ts)` so a re-run is
- * idempotent. Volume is expected-volume based, so stored RVOL stays realistic.
+ * idempotent. RVOL is based on the previous 20 matched sessions at the same
+ * point in the same session; insufficient history remains unavailable.
  */
 async function persistMinuteSeries(
   ctx: PipelineContext,
@@ -170,31 +253,24 @@ async function persistMinuteSeries(
   bars: Bar[],
   stats: DailyStats,
   sessionVwap: number | null,
+  rvolByTime: Map<number, SessionRvolPoint>,
 ): Promise<void> {
   if (bars.length === 0) {
     return;
   }
 
-  const adv = stats.avgDailyVolume;
-  const day = ctx.now.toISOString().slice(0, 10);
-  const rvolFactor = 0.35 + (hash(`${ticker}:rvol:${day}`) % 245) / 100;
   const gapPct = stats.prevClose > 0 ? ((stats.open - stats.prevClose) / stats.prevClose) * 100 : null;
+  const provider = ctx.config.marketProvider;
+  const dataStatus = configuredFeedStatus("market");
 
   const priceRows: (typeof priceSnapshots.$inferInsert)[] = [];
   const volumeRows: (typeof volumeSnapshots.$inferInsert)[] = [];
-  let cumulativeRaw = 0;
-  let cumulativeVolume = 0;
-
   for (const bar of bars) {
     const ts = new Date(bar.time * 1000);
-    const price = bar.open;
+    const price = bar.close;
     const changePctDaily =
       stats.prevClose > 0 ? ((price - stats.prevClose) / stats.prevClose) * 100 : null;
-    const expected = Math.max(1000, adv * Math.max(0.02, volumeProfileFraction(elapsedMinutes(ts))));
-    cumulativeRaw += bar.volume;
-    const nextCumulative = Math.round(cumulativeRaw * rvolFactor);
-    const intervalVolume = Math.max(1, nextCumulative - cumulativeVolume);
-    cumulativeVolume = nextCumulative;
+    const rvolPoint = rvolByTime.get(bar.time) ?? null;
 
     priceRows.push({
       ticker,
@@ -208,14 +284,23 @@ async function persistMinuteSeries(
       low: String(round(Math.min(stats.dayLow, price), 4)),
       open: String(round(stats.open, 4)),
       prevClose: String(round(stats.prevClose, 4)),
+      provider,
+      dataStatus,
+      referencePeriod: "regular_previous_close",
     });
     volumeRows.push({
       ticker,
       ts,
-      cumulativeVolume,
-      intervalVolume,
-      expectedVolumeToDate: String(round(expected, 4)),
-      rvol: String(round(cumulativeVolume / expected, 4)),
+      cumulativeVolume: rvolPoint?.cumulativeVolume ?? null,
+      intervalVolume: bar.volume,
+      expectedVolumeToDate: rvolPoint?.expectedVolume === null || rvolPoint?.expectedVolume === undefined ? null : String(round(rvolPoint.expectedVolume, 4)),
+      rvol: rvolPoint?.rvol === null || rvolPoint?.rvol === undefined ? null : String(round(rvolPoint.rvol, 4)),
+      session: rvolPoint?.session ?? sessionFor(ts),
+      provider,
+      expectedSampleCount: rvolPoint?.expectedSampleCount ?? 0,
+      comparisonSession: rvolPoint?.comparisonSession ?? null,
+      rvolAsOf: rvolPoint?.asOf ?? null,
+      dataStatus,
     });
   }
 
@@ -234,6 +319,9 @@ async function persistMinuteSeries(
         low: sql`excluded.low`,
         open: sql`excluded.open`,
         prevClose: sql`excluded.prev_close`,
+        provider: sql`excluded.provider`,
+        dataStatus: sql`excluded.data_status`,
+        referencePeriod: sql`excluded.reference_period`,
         updatedAt: new Date(),
       },
     });
@@ -244,10 +332,16 @@ async function persistMinuteSeries(
     .onConflictDoUpdate({
       target: [volumeSnapshots.ticker, volumeSnapshots.ts],
       set: {
-        cumulativeVolume: sql`excluded.cumulative_volume`,
+        cumulativeVolume: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.cumulative_volume ELSE ${volumeSnapshots.cumulativeVolume} END`,
         intervalVolume: sql`excluded.interval_volume`,
-        expectedVolumeToDate: sql`excluded.expected_volume_to_date`,
-        rvol: sql`excluded.rvol`,
+        provider: sql`excluded.provider`,
+        expectedVolumeToDate: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.expected_volume_to_date ELSE ${volumeSnapshots.expectedVolumeToDate} END`,
+        rvol: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.rvol ELSE ${volumeSnapshots.rvol} END`,
+        session: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.session ELSE ${volumeSnapshots.session} END`,
+        expectedSampleCount: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.expected_sample_count ELSE ${volumeSnapshots.expectedSampleCount} END`,
+        comparisonSession: sql`CASE WHEN excluded.rvol_as_of IS NOT NULL THEN excluded.comparison_session ELSE ${volumeSnapshots.comparisonSession} END`,
+        rvolAsOf: sql`coalesce(excluded.rvol_as_of, ${volumeSnapshots.rvolAsOf})`,
+        dataStatus: sql`excluded.data_status`,
         updatedAt: new Date(),
       },
     });
@@ -275,12 +369,35 @@ async function advanceMacro(ctx: PipelineContext): Promise<void> {
     }
   }
 
+  const trackedTickers = [...new Set(Object.values(MACRO_LEVEL_TRACKING).map((item) => item.ticker))];
+  const trackedRows = trackedTickers.length > 0
+    ? await ctx.db.selectDistinctOn([priceSnapshots.ticker]).from(priceSnapshots)
+      .where(inArray(priceSnapshots.ticker, trackedTickers))
+      .orderBy(asc(priceSnapshots.ticker), desc(priceSnapshots.ts))
+    : [];
+  const latestPrices = new Map(trackedRows.map((row) => [row.ticker, row]));
+
   for (const config of MACRO_SERIES) {
+    if (config.series === "SOXX" || config.series === "XLK" || config.series === "XLC" || config.series === "XLY") {
+      const snapshot = latestPrices.get(config.series);
+      if (!snapshot) continue;
+      await ctx.db.insert(macroSnapshots).values({
+        series: config.series as never,
+        ts: snapshot.ts,
+        value: snapshot.price,
+        previousValue: snapshot.prevClose,
+        change: snapshot.changePctDaily,
+        unit: "%",
+        provider: snapshot.provider,
+        dataStatus: snapshot.dataStatus,
+      }).onConflictDoNothing();
+      continue;
+    }
     let base = config.base;
     const tracked = MACRO_LEVEL_TRACKING[config.series];
     if (tracked) {
-      const quote = await ctx.providers.market.quote(tracked.ticker, ctx.now);
-      const level = quote ? macroLevelFromEtf(config.series, quote.price) : null;
+      const snapshot = latestPrices.get(tracked.ticker);
+      const level = snapshot ? macroLevelFromEtf(config.series, Number(snapshot.price)) : null;
       if (level !== null) {
         base = level;
       }
@@ -304,6 +421,8 @@ async function advanceMacro(ctx: PipelineContext): Promise<void> {
         previousValue: String(round(prevValue, 4)),
         change: change === null ? null : String(change),
         unit: macroChangeUnit(config.series, config.unit),
+        provider: "mock",
+        dataStatus: "DEMO",
       })
       .onConflictDoNothing();
   }

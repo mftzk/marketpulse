@@ -1,6 +1,6 @@
 import type { EventCardDTO } from "@/lib/core/dto";
 import { COPY } from "@/lib/copy";
-import { formatAge, formatPercent, formatPrice, formatRvol, formatScore } from "@/lib/format";
+import { formatAge, formatClockEt, formatDate, formatPercent, formatPrice, formatRvol, formatScore } from "@/lib/format";
 
 import { CatalystPill } from "./CatalystPill";
 import { ImpactBadge } from "./ImpactBadge";
@@ -64,7 +64,7 @@ export function EventCard({ event }: EventCardProps) {
           <div className="flex shrink-0 flex-col items-end gap-1">
             <ImpactBadge score={event.impact.score} band={event.impact.band} size="sm" />
             <span className="font-mono text-[10px] text-muted">
-              {formatAge(event.news_age_minutes)}
+              {event.published_at ? formatAge(event.news_age_minutes) : "publication time unavailable"}
             </span>
           </div>
         </header>
@@ -84,7 +84,10 @@ export function EventCard({ event }: EventCardProps) {
             </span>
           </span>
           <SessionPill session={event.price.session} />
-          <Metric label="RVOL" value={formatRvol(event.price.rvol)} tone={event.price.rvol !== null && event.price.rvol >= 2 ? "text-accent" : "text-ink"} />
+          <span title={`Volume at ${event.price.rvol_as_of ? `${formatDate(event.price.rvol_as_of)} ${formatClockEt(event.price.rvol_as_of)}` : "unavailable"}; ${event.price.rvol_sample_count === null ? "unavailable" : `${event.price.rvol_sample_count}/20`} matching historical sessions; ${event.price.rvol_volume ?? "unavailable"} actual / ${event.price.rvol_expected_volume ?? "unavailable"} expected`}>
+            <Metric label={`RVOL ${event.price.rvol_session ?? "—"}`} value={formatRvol(event.price.rvol)} tone={event.price.rvol !== null && event.price.rvol >= 2 ? "text-accent" : "text-ink"} />
+          </span>
+          <span className="border border-hairline px-1 text-[9px] uppercase tracking-wide text-muted">{event.price.data_status}</span>
           {sectorEtf ? (
             <span className="inline-flex items-baseline gap-1">
               <span className="font-mono text-[10px] text-muted">{sectorEtf.symbol}</span>
@@ -110,10 +113,10 @@ export function EventCard({ event }: EventCardProps) {
             </span>
           ) : null}
           <div className="inline-flex items-center gap-1.5">
-            <span className="text-[10px] uppercase tracking-wide text-muted">Impact</span>
+            <span className="text-[10px] uppercase tracking-wide text-muted" title="Event-impact score, not probability of a price rise">Impact</span>
             <span className="font-mono text-[11px] text-ink">{formatScore(event.impact.score)}</span>
             <span className="inline-block w-12 align-middle">
-              <ScoreBar value={event.impact.score / 100} />
+              <ScoreBar value={event.impact.score === null ? null : event.impact.score / 100} />
             </span>
           </div>
         </div>
@@ -124,12 +127,16 @@ export function EventCard({ event }: EventCardProps) {
           <SourceBadge
             name={event.source.name}
             tier={event.source.tier}
+            qualityScore={event.source.quality_score}
             qualityLabel={event.source.quality_label}
+            ingestProvider={event.source.ingest_provider}
           />
           <span className="font-mono text-[10px] text-muted">
             {event.article_count} {COPY.eventCard.articles}
             {" · "}
-            {event.published_at.slice(11, 16)} UTC
+            {event.published_at
+              ? `${formatDate(event.published_at)} ${formatClockEt(event.published_at)}`
+              : `received ${formatDate(event.received_at)} ${formatClockEt(event.received_at)}`}
           </span>
         </footer>
       </a>
