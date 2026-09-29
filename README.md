@@ -332,3 +332,25 @@ The app is designed to behave identically at `https://marketpulse.quick.nrapken.
 3. Sentiment alone never decides importance.
 4. Strong YoY growth is not automatically positive; everything is judged against expectations.
 5. Ingestion/analysis never runs synchronously inside a user-facing read.
+
+---
+
+## Deployment automation
+
+`main` is deployed automatically. A Hermes cron job polls
+`github.com/mftzk/marketpulse` every 10 minutes (`~/.hermes/scripts/marketpulse_watch.py`)
+and then:
+
+1. **merges** every open, non-draft pull request that GitHub reports as
+   `MERGEABLE` and that has no failing checks (squash merge, branch deleted);
+   drafts, conflicting PRs and PRs with red checks are never merged
+   automatically — they get reported in chat instead;
+2. **triggers a Quick build with auto-deploy** as soon as `main` moves, so a
+   merged commit reaches `https://marketpulse.quick.nrapken.dev` within ~10
+   minutes (the build itself takes ~3.5 minutes);
+3. **reports** the merge/deploy in chat and stays silent when there is nothing
+   to do — and it reports a failed build once, so a broken merge cannot fail
+   silently.
+
+The deployed revision is tracked in `~/.hermes/state/marketpulse-watch.json`, so a
+commit is never deployed twice.
