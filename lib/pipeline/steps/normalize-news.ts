@@ -6,7 +6,7 @@ import type { JobResult } from "@/lib/pipeline/registry";
 
 /**
  * Step 2: `normalize_news` — trim/normalise headline+body, resolve `news_sources`
- * by provider slug, stamp `published_at` (from `fetched_at` when missing), and
+ * by publisher slug, preserve missing `published_at`, and
  * derive the session. Idempotent.
  */
 
@@ -28,14 +28,12 @@ export async function normalizeNews(ctx: PipelineContext): Promise<JobResult> {
     for (const article of candidates) {
       const headline = (article.headline ?? "").trim();
       const body = article.body ? article.body.trim() : article.body;
-      const publishedAt = article.publishedAt ?? article.fetchedAt;
-      const sourceId = sourceBySlug.get(article.provider) ?? null;
+      const sourceId = article.publisherSlug ? sourceBySlug.get(article.publisherSlug) ?? null : null;
 
       const needsUpdate =
         headline !== article.headline ||
         (body ?? null) !== (article.body ?? null) ||
-        sourceId !== article.sourceId ||
-        (article.publishedAt === null && publishedAt !== null);
+        sourceId !== article.sourceId;
 
       if (!needsUpdate) {
         continue;
@@ -47,7 +45,6 @@ export async function normalizeNews(ctx: PipelineContext): Promise<JobResult> {
           headline,
           body,
           sourceId,
-          publishedAt,
           updatedAt: ctx.now,
         })
         .where(eq(newsArticles.id, article.id));

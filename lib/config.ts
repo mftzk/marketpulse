@@ -31,16 +31,25 @@ const booleanSchema = z
 
 const intSchema = z.coerce.number().int().finite();
 
-const providerSchema = z.enum(["mock"]);
+const newsProviderSchema = z.enum(["mock", "benzinga"]);
+const marketProviderSchema = z.enum(["mock", "massive"]);
+const fundamentalProviderSchema = z.enum(["mock", "fmp"]);
 
 const logLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 
-function parseProvider(value: string | null, fallback: "mock"): "mock" {
+function parseProvider<T extends "mock" | "massive" | "benzinga" | "fmp">(
+  value: string | null,
+  schema: z.ZodType<T>,
+  fallback: T,
+): T {
   if (value === null) {
     return fallback;
   }
-  const parsed = providerSchema.safeParse(value);
-  return parsed.success ? parsed.data : fallback;
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(`Invalid provider value '${value}'. Check the configured feed provider.`);
+  }
+  return parsed.data;
 }
 
 function parseLogLevel(value: string | null): LogLevel {
@@ -79,10 +88,13 @@ export interface Config {
   llmBaseUrl: string | null;
   llmModel: string;
   llmConfigured: boolean;
-  newsProvider: "mock";
+  newsProvider: "mock" | "benzinga";
   newsMode: "backfill" | "live";
-  marketProvider: "mock";
-  fundamentalProvider: "mock";
+  marketProvider: "mock" | "massive";
+  fundamentalProvider: "mock" | "fmp";
+  massiveApiKey: string | null;
+  benzingaApiKey: string | null;
+  fmpApiKey: string | null;
   pipelineAutorun: boolean;
   pipelineTickSeconds: number;
   logLevel: LogLevel;
@@ -114,6 +126,9 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   const llmBaseUrl = nonEmpty(env.LLM_BASE_URL);
   const llmModel = nonEmpty(env.LLM_MODEL) ?? "gpt-4o-mini";
   const appUrl = nonEmpty(env.APP_URL);
+  const massiveApiKey = nonEmpty(env.MASSIVE_API_KEY);
+  const benzingaApiKey = nonEmpty(env.BENZINGA_API_KEY);
+  const fmpApiKey = nonEmpty(env.FMP_API_KEY);
 
   const logLevel = parseLogLevel(nonEmpty(env.LOG_LEVEL));
   const pipelineTickSeconds = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_SECONDS), 30);
@@ -138,10 +153,13 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     llmBaseUrl,
     llmModel,
     llmConfigured: llmApiKey !== null,
-    newsProvider: parseProvider(nonEmpty(env.NEWS_PROVIDER), "mock"),
+    newsProvider: parseProvider(nonEmpty(env.NEWS_PROVIDER), newsProviderSchema, "mock"),
     newsMode: nonEmpty(env.NEWS_MODE) === "backfill" ? "backfill" : "live",
-    marketProvider: parseProvider(nonEmpty(env.MARKET_PROVIDER), "mock"),
-    fundamentalProvider: parseProvider(nonEmpty(env.FUNDAMENTAL_PROVIDER), "mock"),
+    marketProvider: parseProvider(nonEmpty(env.MARKET_PROVIDER), marketProviderSchema, "mock"),
+    fundamentalProvider: parseProvider(nonEmpty(env.FUNDAMENTAL_PROVIDER), fundamentalProviderSchema, "mock"),
+    massiveApiKey,
+    benzingaApiKey,
+    fmpApiKey,
     pipelineAutorun: parseBoolean(nonEmpty(env.PIPELINE_AUTORUN), false),
     pipelineTickSeconds,
     logLevel,

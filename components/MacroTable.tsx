@@ -1,4 +1,4 @@
-import { formatClockEt, formatMacroChange, formatPrice } from "@/lib/format";
+import { formatClockEt, formatDate, formatMacroChange, formatPrice } from "@/lib/format";
 import { macroSeriesKind } from "@/lib/market/macro";
 import type { MacroValueView } from "@/lib/view-types";
 
@@ -44,7 +44,7 @@ export function MacroTable({ macro, order, limit }: MacroTableProps) {
         <tbody>
           {shown.map((key) => {
             const entry = macro[key];
-            const digits = Math.abs(entry.value) >= 100 ? 1 : 2;
+            const digits = entry.value !== null && Math.abs(entry.value) >= 100 ? 1 : 2;
             const showUnit = macroSeriesKind(key) === "rate" && Boolean(entry.unit);
             return (
               <tr key={key} className="border-b border-hairline last:border-0">
@@ -57,7 +57,8 @@ export function MacroTable({ macro, order, limit }: MacroTableProps) {
                   {formatMacroChange(key, entry.change, entry.unit)}
                 </td>
                 <td className="py-1.5 text-right font-mono text-[10px] text-muted">
-                  {formatClockEt(entry.as_of)}
+                  {entry.as_of ? `${formatDate(entry.as_of)} ${formatClockEt(entry.as_of)}` : "—"}
+                  {entry.data_status ? <span className="ml-2">{entry.data_status}</span> : null}
                 </td>
               </tr>
             );

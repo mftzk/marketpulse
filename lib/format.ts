@@ -162,7 +162,7 @@ export function formatClockEt(ts: string | number | Date | null | undefined): st
   }).format(date)} ET`;
 }
 
-/** ISO date portion, e.g. `2026-01-05`. */
+/** Eastern Time calendar date, e.g. `2026-01-05`. */
 export function formatDate(value: string | null | undefined): string {
   if (!value) {
     return EMPTY;
@@ -171,7 +171,14 @@ export function formatDate(value: string | null | undefined): string {
   if (Number.isNaN(date.getTime())) {
     return EMPTY;
   }
-  return date.toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
 export { EMPTY as FORMAT_EMPTY };

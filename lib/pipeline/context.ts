@@ -37,11 +37,14 @@ export interface PipelineState {
     catalystDirection: string | null;
     companyRelevance: number;
     eventImportance: number;
-    sourceQuality: number;
+    sourceQuality: number | null;
     affectedTickers: string[];
     affectedSectors: string[];
     reasoning: string;
-    publishedAt: Date;
+    publishedAt: Date | null;
+    receivedAt: Date;
+    dedupeAt: Date;
+    fiscalPeriod: string | null;
     source: "llm" | "rules";
   }[];
 }

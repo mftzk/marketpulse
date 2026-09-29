@@ -60,12 +60,11 @@ export const COMPONENT_ORDER: readonly ImpactComponentKey[] = [
 export interface ImpactComponent {
   key: ImpactComponentKey;
   label: string;
-  /** Raw input value (0 when missing). */
-  raw: number;
-  /** Normalized 0..1 (0 when missing). */
-  normalized: number;
-  weight: number;
-  points: number;
+  /** Null means no evidence was available; zero is a measured zero. */
+  raw: number | null;
+  normalized: number | null;
+  weight: number | null;
+  points: number | null;
   explanation: string;
 }
 

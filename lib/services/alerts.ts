@@ -1,10 +1,13 @@
 import { desc, eq, inArray, sql } from "drizzle-orm";
 
 import { config } from "@/lib/config";
+import { evaluateRule } from "@/lib/alerts/evaluate";
+import type { AlertConditions } from "@/lib/alerts/conditions";
 import type { AlertEventDTO, AlertRuleDTO } from "@/lib/core/detail";
 import { getDb } from "@/lib/db/client";
 import { alertEvents, alertRules, users } from "@/lib/db/schema";
 import { toIso } from "@/lib/services/shared";
+import { listEvents } from "@/lib/services/events";
 
 async function getAdminUserId(): Promise<string> {
   const db = getDb();
@@ -42,6 +45,47 @@ export interface AlertUpdateInput {
   channels?: string[];
 }
 
+export async function previewAlertConditions(conditions: AlertConditions): Promise<{
+  scanned: number;
+  total_available: number;
+  matches: { event_id: string; ticker: string | null; headline: string; impact_score: number | null; rvol: number | null; change_pct: number | null; matched: string[] }[];
+}> {
+  // Read-only by design: the same pure evaluator used by pipeline delivery is
+  // run against the current event DTOs; no rule or alert row is written.
+  const candidates: Awaited<ReturnType<typeof listEvents>>["data"] = [];
+  let offset = 0;
+  let totalAvailable = 0;
+  while (offset < 200) {
+    const page = await listEvents({ limit: 100, offset, sort: "published_desc", max_age_minutes: 60 });
+    totalAvailable = page.page.total;
+    candidates.push(...page.data);
+    offset += page.data.length;
+    if (!page.page.has_more || page.data.length === 0) break;
+  }
+  const matches = candidates.flatMap((event) => {
+    const evaluation = evaluateRule(conditions, {
+      impactScore: event.impact.score,
+      newsAgeMinutes: event.news_age_minutes,
+      rvol: event.price.rvol,
+      changePct: event.price.change_pct_since_publication,
+      ticker: event.ticker,
+      eventType: event.event_type,
+      catalystDirection: event.catalyst_direction,
+      sector: event.sector,
+    });
+    return evaluation.matches ? [{
+      event_id: event.id,
+      ticker: event.ticker,
+      headline: event.headline,
+      impact_score: event.impact.score,
+      rvol: event.price.rvol,
+      change_pct: event.price.change_pct_since_publication,
+      matched: evaluation.matched,
+    }] : [];
+  });
+  return { scanned: candidates.length, total_available: totalAvailable, matches };
+}
+
 export async function listAlerts(): Promise<{ rules: AlertRuleDTO[]; events: AlertEventDTO[] }> {
   const db = getDb();
   const userId = await getAdminUserId();
@@ -71,6 +115,7 @@ export async function listAlerts(): Promise<{ rules: AlertRuleDTO[]; events: Ale
       body: e.body,
       delivered_channels: e.deliveredChannels ?? [],
       status: e.status,
+      material_reason: e.materialReason,
     })),
   };
 }

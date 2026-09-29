@@ -16,10 +16,10 @@ export type RelatedRelation = "peer" | "sector" | "benchmark" | "affected";
 export interface ImpactComponentDTO {
   key: string;
   label: string;
-  raw: number;
-  normalized: number;
-  weight: number;
-  points: number;
+  raw: number | null;
+  normalized: number | null;
+  weight: number | null;
+  points: number | null;
   explanation: string;
 }
 
@@ -32,19 +32,23 @@ export interface EventCardDTO {
   summary: string;
   event_type: EventType;
   event_type_label: string;
-  published_at: string;
-  news_age_minutes: number;
-  source: { name: string; tier: number; quality_label: QualityLabel };
+  published_at: string | null;
+  received_at: string;
+  news_age_minutes: number | null;
+  source: { name: string | null; tier: number | null; quality_score: number | null; quality_label: QualityLabel | null; ingest_provider: string | null };
   sentiment: number;
   catalyst_direction: CatalystDirection;
   relevance_score: number;
   event_importance: number;
   analysis_source: AnalysisSource;
   impact: {
-    score: number;
-    band: ImpactBand;
+    score: number | null;
+    band: ImpactBand | null;
     components: ImpactComponentDTO[];
     algorithm_version: string;
+    computed_at: string | null;
+    initial_score: number | null;
+    initial_computed_at: string | null;
   };
   price: {
     last: number | null;
@@ -52,6 +56,13 @@ export interface EventCardDTO {
     session: MarketSession;
     gap_pct: number | null;
     rvol: number | null;
+    rvol_as_of: string | null;
+    rvol_session: string | null;
+    rvol_volume: number | null;
+    rvol_expected_volume: number | null;
+    rvol_sample_count: number | null;
+    data_status: string;
+    as_of: string | null;
     vwap: number | null;
     atr_pct: number | null;
   };

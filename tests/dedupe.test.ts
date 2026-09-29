@@ -91,10 +91,18 @@ describe("event clustering", () => {
     expect(clusterEvents(entries)).toHaveLength(2);
   });
 
-  it("keeps events apart beyond 90 minutes", () => {
+  it("merges matching cross-tick stories within 24 hours", () => {
     const entries = [
       cls({ id: "a", publishedAt: new Date("2026-01-05T18:00:00Z") }),
-      cls({ id: "b", publishedAt: new Date("2026-01-05T20:00:00Z") }),
+      cls({ id: "b", headline: "NVIDIA quarterly results beat analyst estimates", publishedAt: new Date("2026-01-06T17:00:00Z") }),
+    ];
+    expect(clusterEvents(entries)).toHaveLength(1);
+  });
+
+  it("keeps matching stories apart beyond 24 hours", () => {
+    const entries = [
+      cls({ id: "a", publishedAt: new Date("2026-01-05T18:00:00Z") }),
+      cls({ id: "b", publishedAt: new Date("2026-01-06T18:01:00Z") }),
     ];
     expect(clusterEvents(entries)).toHaveLength(2);
   });

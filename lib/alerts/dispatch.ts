@@ -22,6 +22,9 @@ export interface DispatchInput {
   cooldownMinutes: number;
   lastTriggeredAt: Date | null;
   now?: Date;
+  materialState?: string;
+  materialRevision?: number;
+  materialReason?: string;
 }
 
 export interface DispatchOutcome {
@@ -35,7 +38,7 @@ export interface DispatchOutcome {
 export async function dispatchAlert(input: DispatchInput): Promise<DispatchOutcome> {
   const now = input.now ?? new Date();
 
-  if (input.lastTriggeredAt !== null) {
+  if (!input.materialState && input.lastTriggeredAt !== null) {
     const cooldownMs = input.cooldownMinutes * 60_000;
     if (now.getTime() - input.lastTriggeredAt.getTime() < cooldownMs) {
       return {
@@ -48,9 +51,43 @@ export async function dispatchAlert(input: DispatchInput): Promise<DispatchOutco
     }
   }
 
+  const dedupeKey = input.materialState
+    ? `${input.ruleId}:${input.eventId}:${input.materialRevision ?? 1}:${input.materialState}`
+    : null;
+  let reservedId: string | null = null;
+  try {
+    const reserved = await input.db.insert(alertEvents).values({
+      ruleId: input.ruleId,
+      eventId: input.eventId,
+      triggeredAt: now,
+      matchedConditions: input.matched,
+      title: input.title,
+      body: input.body,
+      deliveredChannels: [],
+      status: "pending",
+      materialState: input.materialState ?? null,
+      materialReason: input.materialReason ?? null,
+      dedupeKey,
+    }).onConflictDoNothing({
+      target: alertEvents.dedupeKey,
+      where: sql`${alertEvents.dedupeKey} IS NOT NULL`,
+    }).returning({ id: alertEvents.id });
+    reservedId = reserved[0]?.id ?? null;
+    if (!reservedId) {
+      return { dispatched: false, reason: "duplicate_material_state", status: "pending", deliveredChannels: [], results: [] };
+    }
+  } catch (err) {
+    logger.error("alert_reservation_failed", {
+      event: "alert.dispatch",
+      ruleId: input.ruleId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { dispatched: false, reason: "persist_failed", status: "failed", deliveredChannels: [], results: [] };
+  }
+
   const results = await deliver(input.channels, {
     title: input.title,
-    body: input.body,
+    body: input.materialReason ? `${input.body}\n\nWhy this alert fired: ${input.materialReason}` : input.body,
     eventId: input.eventId,
   });
 
@@ -62,16 +99,10 @@ export async function dispatchAlert(input: DispatchInput): Promise<DispatchOutco
 
   try {
     await input.db.transaction(async (tx) => {
-      await tx.insert(alertEvents).values({
-        ruleId: input.ruleId,
-        eventId: input.eventId,
-        triggeredAt: now,
-        matchedConditions: input.matched,
-        title: input.title,
-        body: input.body,
+      await tx.update(alertEvents).set({
         deliveredChannels,
         status,
-      });
+      }).where(eq(alertEvents.id, reservedId as string));
       await tx
         .update(alertRules)
         .set({

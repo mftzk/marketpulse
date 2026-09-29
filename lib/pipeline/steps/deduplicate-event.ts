@@ -1,9 +1,9 @@
-import { eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, or, sql } from "drizzle-orm";
 
-import { clusterEvents, dedupeBucket } from "@/lib/analysis/dedupe";
+import { articleFingerprint, clusterEvents, dedupeBucket, headlinesReferToSameEvent, normalizeTokens } from "@/lib/analysis/dedupe";
 import { sessionFor } from "@/lib/core/session";
 import { cacheKeys } from "@/lib/cache/keys";
-import { companies, eventArticles, eventTickers, marketEvents, newsArticles } from "@/lib/db/schema";
+import { companies, eventArticles, eventTickers, marketEvents, newsArticles, newsSources } from "@/lib/db/schema";
 import type { PipelineContext } from "@/lib/pipeline/context";
 import type { JobResult } from "@/lib/pipeline/registry";
 
@@ -34,8 +34,8 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
         eventType: c.eventType as never,
         headline: c.headline,
         summary: c.summary,
-        publishedAt: c.publishedAt,
-        sourceQuality: c.sourceQuality,
+        publishedAt: c.dedupeAt,
+        sourceQuality: c.sourceQuality ?? 0,
       })),
     );
 
@@ -48,8 +48,8 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
     for (const cluster of clusters) {
       const memberIds = cluster.members.map((m) => m.id);
       const memberClass = classifications.filter((c) => memberIds.includes(c.articleId));
-      const canonical = classifications.find((c) => c.articleId === cluster.canonicalId) ?? memberClass[0];
-      if (!canonical) {
+      const selectedCanonical = classifications.find((c) => c.articleId === cluster.canonicalId) ?? memberClass[0];
+      if (!selectedCanonical) {
         continue;
       }
 
@@ -62,65 +62,77 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
             : "hybrid";
 
       const ticker = cluster.ticker;
-      const publishedAt = cluster.members
-        .map((m) => m.publishedAt)
-        .sort((a, b) => a.getTime() - b.getTime())[0];
-      const dedupeKey = ticker
-        ? `${ticker}:${cluster.eventType}:${dedupeBucket(publishedAt)}`
-        : null;
+      const knownPublished = memberClass.map((item) => item.publishedAt).filter((value): value is Date => value !== null);
+      const clusterPublishedAt = knownPublished.sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
+      const receivedAt = memberClass.map((item) => item.receivedAt).sort((a, b) => a.getTime() - b.getTime())[0] ?? ctx.now;
+      const dedupeAt = clusterPublishedAt ?? receivedAt;
+      const similarSince = new Date(dedupeAt.getTime() - 24 * 60 * 60_000);
+      const existingCandidates = ticker ? await ctx.db.select().from(marketEvents)
+        .where(and(
+          eq(marketEvents.ticker, ticker),
+          eq(marketEvents.eventType, cluster.eventType as never),
+          or(
+            gte(sql`coalesce(${marketEvents.publishedAt}, ${marketEvents.firstReceivedAt})`, similarSince),
+            gte(marketEvents.latestUpdateAt, similarSince),
+          ),
+        )).orderBy(desc(marketEvents.latestUpdateAt)) : [];
+      const matchedEvent = existingCandidates.find((candidate) => headlinesReferToSameEvent(candidate.headline, cluster.headline)) ?? null;
+      const publishedAt = matchedEvent?.publishedAt && (!clusterPublishedAt || matchedEvent.publishedAt < clusterPublishedAt)
+        ? matchedEvent.publishedAt
+        : clusterPublishedAt;
+
+      let canonical = selectedCanonical;
+      let canonicalArticleId: string | null = selectedCanonical.articleId;
+      let oldCanonicalQuality: number | null = null;
+      if (matchedEvent?.canonicalArticleId) {
+        const oldSource = await ctx.db.select({ quality: sql<string | null>`${newsSources.qualityScore}` })
+          .from(newsArticles).leftJoin(newsSources, eq(newsArticles.sourceId, newsSources.id))
+          .where(eq(newsArticles.id, matchedEvent.canonicalArticleId)).limit(1);
+        oldCanonicalQuality = oldSource[0]?.quality === null || oldSource[0]?.quality === undefined ? null : Number(oldSource[0].quality);
+        if ((selectedCanonical.sourceQuality === null && oldCanonicalQuality !== null) ||
+          (oldCanonicalQuality !== null && selectedCanonical.sourceQuality !== null && oldCanonicalQuality > selectedCanonical.sourceQuality)) {
+          canonicalArticleId = matchedEvent.canonicalArticleId;
+        }
+      }
+      const keepExistingCanonical = Boolean(matchedEvent && canonicalArticleId !== selectedCanonical.articleId);
+      const dedupeKey = matchedEvent?.dedupeKey ?? (ticker
+        ? `${ticker}:${cluster.eventType}:${articleFingerprint([normalizeTokens(cluster.headline).join(" ")])}`
+        : null);
 
       const company = ticker ? companyByTicker.get(ticker) : undefined;
       const affectedTickers = [...new Set(memberClass.flatMap((m) => m.affectedTickers))].slice(0, 12);
       const affectedSectors = [...new Set(memberClass.flatMap((m) => m.affectedSectors))].slice(0, 6);
 
       const baseValues = {
-        headline: cluster.headline,
-        summary: cluster.summary,
+        canonicalArticleId,
+        headline: keepExistingCanonical ? matchedEvent?.headline ?? cluster.headline : cluster.headline,
+        summary: keepExistingCanonical ? matchedEvent?.summary ?? cluster.summary : cluster.summary,
         eventType: cluster.eventType,
         ticker,
         companyId: company?.id ?? null,
         sectorId: company?.sectorId ?? null,
-        sentiment: String(canonical.sentiment),
-        catalystDirection: canonical.catalystDirection as never,
-        companyRelevance: String(canonical.companyRelevance),
-        eventImportance: String(canonical.eventImportance),
+        sentiment: String(keepExistingCanonical ? matchedEvent?.sentiment ?? 0 : canonical.sentiment),
+        catalystDirection: (keepExistingCanonical ? matchedEvent?.catalystDirection : canonical.catalystDirection) as never,
+        companyRelevance: String(keepExistingCanonical ? matchedEvent?.companyRelevance ?? 0 : canonical.companyRelevance),
+        eventImportance: String(keepExistingCanonical ? matchedEvent?.eventImportance ?? 0 : canonical.eventImportance),
         affectedTickers,
         affectedSectors,
-        reasoning: canonical.reasoning,
+        reasoning: keepExistingCanonical ? matchedEvent?.reasoning ?? null : canonical.reasoning,
         publishedAt,
+        fiscalPeriod: canonical.fiscalPeriod ?? matchedEvent?.fiscalPeriod ?? null,
+        firstReceivedAt: matchedEvent && matchedEvent.firstReceivedAt < receivedAt ? matchedEvent.firstReceivedAt : receivedAt,
         dedupeKey,
-        articleCount: cluster.articleCount,
+        articleCount: (matchedEvent?.articleCount ?? 0) + cluster.articleCount,
         analysisSource,
-        session: sessionFor(publishedAt),
+        session: publishedAt ? sessionFor(publishedAt) : null,
         latestUpdateAt: ctx.now,
         updatedAt: ctx.now,
       };
 
-      const existing = dedupeKey
-        ? await ctx.db
-            .select({ id: marketEvents.id })
-            .from(marketEvents)
-            .where(eq(marketEvents.dedupeKey, dedupeKey))
-        : [];
-      const isNew = existing.length === 0;
-
-      const upserted = await ctx.db
-        .insert(marketEvents)
-        .values(baseValues)
-        .onConflictDoUpdate({
-          target: marketEvents.dedupeKey,
-          targetWhere: sql`${marketEvents.dedupeKey} IS NOT NULL`,
-          set: {
-            headline: baseValues.headline,
-            summary: baseValues.summary,
-            articleCount: baseValues.articleCount,
-            affectedTickers: baseValues.affectedTickers,
-            affectedSectors: baseValues.affectedSectors,
-            latestUpdateAt: ctx.now,
-            updatedAt: ctx.now,
-          },
-        })
-        .returning({ id: marketEvents.id });
+      const isNew = matchedEvent === null;
+      const upserted = matchedEvent
+        ? await ctx.db.update(marketEvents).set(baseValues).where(eq(marketEvents.id, matchedEvent.id)).returning({ id: marketEvents.id })
+        : await ctx.db.insert(marketEvents).values(baseValues).onConflictDoNothing().returning({ id: marketEvents.id });
 
       if (upserted.length === 0) {
         continue;
@@ -136,7 +148,7 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
       for (const member of cluster.members) {
         await ctx.db
           .update(newsArticles)
-          .set({ eventId, isPrimary: member.isPrimary, updatedAt: ctx.now })
+          .set({ eventId, isPrimary: false, updatedAt: ctx.now })
           .where(eq(newsArticles.id, member.id));
 
         await ctx.db
@@ -145,10 +157,21 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
             eventId,
             articleId: member.id,
             similarity: String(member.similarity),
-            isPrimary: member.isPrimary,
+            isPrimary: false,
+            isNewInformation: !isNew,
           })
           .onConflictDoNothing();
       }
+
+      const canonicalId = canonicalArticleId;
+      if (canonicalId) {
+        await ctx.db.update(eventArticles).set({ isPrimary: false, updatedAt: ctx.now }).where(eq(eventArticles.eventId, eventId));
+        await ctx.db.update(eventArticles).set({ isPrimary: true, updatedAt: ctx.now }).where(and(eq(eventArticles.eventId, eventId), eq(eventArticles.articleId, canonicalId)));
+        await ctx.db.update(newsArticles).set({ isPrimary: false, updatedAt: ctx.now }).where(eq(newsArticles.eventId, eventId));
+        await ctx.db.update(newsArticles).set({ isPrimary: true, updatedAt: ctx.now }).where(eq(newsArticles.id, canonicalId));
+      }
+      const linkedCount = await ctx.db.select({ count: sql<number>`count(*)::int` }).from(eventArticles).where(eq(eventArticles.eventId, eventId));
+      await ctx.db.update(marketEvents).set({ articleCount: linkedCount[0]?.count ?? baseValues.articleCount, updatedAt: ctx.now }).where(eq(marketEvents.id, eventId));
 
       if (ticker) {
         await ctx.db
@@ -179,7 +202,7 @@ export async function deduplicateEvent(ctx: PipelineContext): Promise<JobResult>
       if (ticker) {
         try {
           await ctx.cache.set(
-            cacheKeys.dedupe(ticker, cluster.eventType, dedupeBucket(publishedAt)),
+            cacheKeys.dedupe(ticker, cluster.eventType, dedupeBucket(dedupeAt)),
             eventId,
             6 * 60 * 60,
           );

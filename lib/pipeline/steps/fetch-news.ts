@@ -1,5 +1,6 @@
 import { articleFingerprint } from "@/lib/analysis/dedupe";
-import { newsArticles } from "@/lib/db/schema";
+import { newsArticles, newsSources } from "@/lib/db/schema";
+import { configuredFeedStatus } from "@/lib/providers";
 import type { PipelineContext } from "@/lib/pipeline/context";
 import type { JobResult } from "@/lib/pipeline/registry";
 
@@ -16,7 +17,8 @@ function articleHash(input: {
   provider: string;
   url: string | null;
   headline: string;
-  publishedAt: Date;
+  publishedAt: Date | null;
+  fetchedAt: Date;
   hash?: string;
 }): string {
   if (input.hash) {
@@ -24,7 +26,7 @@ function articleHash(input: {
   }
   const ticker = input.tickersRaw[0] ?? "";
   const urlOrHeadline = input.url ?? input.headline;
-  const hour = new Date(input.publishedAt);
+  const hour = new Date(input.publishedAt ?? input.fetchedAt);
   hour.setUTCMinutes(0, 0, 0);
   return articleFingerprint([ticker, input.provider, urlOrHeadline, hour.toISOString()]);
 }
@@ -32,6 +34,20 @@ function articleHash(input: {
 export async function fetchNews(ctx: PipelineContext): Promise<JobResult> {
   const started = Date.now();
   try {
+    const catalog = await ctx.providers.news.sourceCatalog();
+    for (const source of catalog) {
+      await ctx.db.insert(newsSources).values({
+        slug: source.slug, name: source.name, url: source.url, tier: source.tier,
+        qualityScore: String(source.qualityScore), kind: source.kind,
+      }).onConflictDoUpdate({
+        target: newsSources.slug,
+        set: {
+          name: source.name, url: source.url, tier: source.tier,
+          qualityScore: String(source.qualityScore), kind: source.kind,
+          updatedAt: ctx.now,
+        },
+      });
+    }
     const articles = await ctx.providers.news.list({ sinceMinutes: LOOKBACK_MINUTES });
     let ingested = 0;
 
@@ -39,16 +55,20 @@ export async function fetchNews(ctx: PipelineContext): Promise<JobResult> {
       const inserted = await ctx.db
         .insert(newsArticles)
         .values({
-          provider: article.provider,
+          provider: article.publisherSlug ?? "",
+          ingestProvider: article.provider,
+          dataStatus: configuredFeedStatus("news"),
+          publisherSlug: article.publisherSlug ?? null,
           providerArticleId: article.providerArticleId,
           url: article.url,
           headline: article.headline,
           body: article.body,
           publishedAt: article.publishedAt,
           fetchedAt: article.fetchedAt,
+          firstReceivedAt: article.fetchedAt,
           author: article.author,
           tickersRaw: article.tickersRaw,
-          hash: articleHash(article),
+          hash: articleHash({ ...article, fetchedAt: article.fetchedAt }),
           raw: article.raw,
         })
         .onConflictDoNothing({ target: newsArticles.hash })

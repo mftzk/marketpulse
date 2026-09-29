@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { config } from "@/lib/config";
+import { sessionFor } from "@/lib/core/session";
 import type { WatchlistDTO, WatchlistStockDTO } from "@/lib/core/detail";
 import { AppError } from "@/lib/errors";
 import { getDb } from "@/lib/db/client";
@@ -8,6 +9,7 @@ import { latestEventByTicker } from "@/lib/db/queries/events";
 import { latestPriceSnapshots, latestVolumeSnapshots } from "@/lib/db/queries/market-data";
 import { companies, users, watchlistStocks, watchlists } from "@/lib/db/schema";
 import { num } from "@/lib/services/shared";
+import { storedFeedStatus } from "@/lib/providers";
 
 async function getAdminUserId(): Promise<string> {
   const db = getDb();
@@ -26,6 +28,12 @@ function emptyStock(ticker: string, note: string | null = null): WatchlistStockD
     price: null,
     change_pct: null,
     rvol: null,
+    rvol_as_of: null,
+    rvol_session: null,
+    rvol_volume: null,
+    rvol_expected_volume: null,
+    rvol_sample_count: null,
+    rvol_data_status: "UNAVAILABLE",
     latest_catalyst: null,
     catalyst_age_minutes: null,
     impact_score: null,
@@ -45,13 +53,13 @@ async function stockRows(tickers: string[]): Promise<Map<string, WatchlistStockD
     return result;
   }
 
+  const now = Date.now();
   const [prices, volumes, events] = await Promise.all([
     latestPriceSnapshots(db, unique),
-    latestVolumeSnapshots(db, unique),
+    latestVolumeSnapshots(db, unique, sessionFor(new Date(now))),
     latestEventByTicker(db, unique),
   ]);
 
-  const now = Date.now();
   for (const ticker of unique) {
     const price = prices.get(ticker) ?? null;
     const volume = volumes.get(ticker) ?? null;
@@ -62,6 +70,12 @@ async function stockRows(tickers: string[]): Promise<Map<string, WatchlistStockD
       price: num(price?.price),
       change_pct: num(price?.changePctDaily),
       rvol: num(volume?.rvol),
+      rvol_as_of: volume?.rvolAsOf?.toISOString() ?? null,
+      rvol_session: volume?.session ?? null,
+      rvol_volume: volume?.cumulativeVolume ?? null,
+      rvol_expected_volume: num(volume?.expectedVolumeToDate),
+      rvol_sample_count: volume?.expectedSampleCount ?? null,
+      rvol_data_status: storedFeedStatus(volume?.dataStatus, volume?.rvolAsOf, "market", new Date(now)),
       latest_catalyst: event?.headline ?? null,
       catalyst_age_minutes: event?.publishedAt
         ? Math.max(0, Math.floor((now - event.publishedAt.getTime()) / 60_000))

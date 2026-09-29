@@ -27,7 +27,11 @@ export interface HealthView {
     last_success_at: string | null;
     last_failure_reason: string | null;
   };
-  providers: { news: string; market: string; fundamental: string };
+  providers: {
+    news: { provider: string; status: string };
+    market: { provider: string; status: string };
+    fundamental: { provider: string; status: string };
+  };
   pipeline: {
     last_run_at: string | null;
     last_status: string | null;
@@ -58,17 +62,23 @@ export interface SectorSummaryView {
   name: string;
   etf_symbol: string | null;
   change_pct: number | null;
+  change_as_of?: string | null;
+  reference_price?: number | null;
+  data_status?: string;
   advancers: number;
   decliners: number;
   top_event: SectorTopEventView | null;
 }
 
 export interface MacroValueView {
-  value: number;
+  value: number | null;
   previous: number | null;
   change: number | null;
   unit: string | null;
   as_of: string | null;
+  reference_price?: number | null;
+  reference_period?: string | null;
+  data_status?: string;
 }
 
 export interface RegimeView {
@@ -84,7 +94,8 @@ export interface MarketContextView {
   sectors: SectorSummaryView[];
   macro: Record<string, MacroValueView>;
   regime: RegimeView | null;
-  breadth: { advancers: number; decliners: number };
+  breadth: { advancers: number; decliners: number; tracked?: number; with_data?: number };
+  feeds?: Record<string, { provider: string; status: string }>;
 }
 
 export interface SectorStockView {

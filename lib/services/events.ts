@@ -11,6 +11,7 @@ import {
   earningsResult,
   eventArticles,
   eventTickers,
+  fundamentalExpectations,
   impactScoreComponents,
   impactScores,
   macroSnapshots,
@@ -21,7 +22,8 @@ import {
   sectors,
   technicalSnapshots,
 } from "@/lib/db/schema";
-import { computeImpactScore } from "@/lib/scoring/impact";
+import { bandForScore } from "@/lib/scoring/impact";
+import { surprisePct } from "@/lib/analysis/surprise";
 import {
   computeReactionInputsBatch,
   computeReactionSummariesBatch,
@@ -30,7 +32,7 @@ import {
   reactionRequestKey,
 } from "@/lib/db/queries/market-data";
 import { deriveMacroChange, deriveRegime, macroChangeUnit, type MacroPoint } from "@/lib/market/macro";
-import { getMarketDataProvider } from "@/lib/providers";
+import { getMarketDataProvider, storedFeedStatus } from "@/lib/providers";
 import {
   buildEventInterpretation,
   directionOrNeutral,
@@ -49,12 +51,22 @@ interface EventRow {
   score: string | null;
   band: string | null;
   algorithmVersion: string | null;
+  computedAt: Date | null;
+  initialScore: string | null;
+  initialComputedAt: Date | null;
+  rvolSnapshot: string | null;
+  rvolAsOf: Date | null;
+  rvolVolume: number | null;
+  rvolExpectedVolume: string | null;
+  rvolSampleCount: number | null;
+  rvolSession: string | null;
   companyName: string | null;
   sectorSlug: string | null;
   sectorEtf: string | null;
   sourceName: string | null;
   sourceTier: number | null;
   sourceQuality: string | null;
+  ingestProvider: string | null;
 }
 
 function buildWhere(filters: EventFilters, now: Date): ReturnType<typeof and> | undefined {
@@ -85,7 +97,7 @@ function buildWhere(filters: EventFilters, now: Date): ReturnType<typeof and> | 
     parts.push(sql`${impactScores.score} <= ${filters.max_impact}`);
   }
   if (filters.max_age_minutes !== undefined) {
-    parts.push(gte(marketEvents.publishedAt, new Date(now.getTime() - filters.max_age_minutes * 60_000)));
+    parts.push(sql`coalesce(${marketEvents.publishedAt}, ${marketEvents.firstReceivedAt}) >= ${new Date(now.getTime() - filters.max_age_minutes * 60_000)}`);
   }
   if (filters.q !== undefined) {
     const like = `%${filters.q}%`;
@@ -104,12 +116,22 @@ function baseQuery() {
       score: impactScores.score,
       band: impactScores.band,
       algorithmVersion: impactScores.algorithmVersion,
+      computedAt: impactScores.computedAt,
+      initialScore: impactScores.initialScore,
+      initialComputedAt: impactScores.initialComputedAt,
+      rvolSnapshot: impactScores.rvolSnapshot,
+      rvolAsOf: impactScores.rvolAsOf,
+      rvolVolume: impactScores.rvolVolume,
+      rvolExpectedVolume: impactScores.rvolExpectedVolume,
+      rvolSampleCount: impactScores.rvolSampleCount,
+      rvolSession: impactScores.rvolSession,
       companyName: companies.name,
       sectorSlug: sectors.slug,
       sectorEtf: sectors.etfSymbol,
       sourceName: newsSources.name,
       sourceTier: newsSources.tier,
       sourceQuality: newsSources.qualityScore,
+      ingestProvider: newsArticles.ingestProvider,
     })
     .from(marketEvents)
     .leftJoin(companies, eq(marketEvents.companyId, companies.id))
@@ -165,10 +187,10 @@ async function componentsForEvents(eventIds: string[]): Promise<Map<string, Even
     list.push({
       key: row.key,
       label: row.label,
-      raw: num(row.raw) ?? 0,
-      normalized: num(row.normalized) ?? 0,
-      weight: num(row.weight) ?? 0,
-      points: num(row.points) ?? 0,
+      raw: num(row.raw),
+      normalized: num(row.normalized),
+      weight: num(row.weight),
+      points: num(row.points),
       explanation: row.explanation ?? "",
     });
     result.set(row.eventId, list);
@@ -194,34 +216,15 @@ async function tickersForEvents(eventIds: string[]): Promise<Map<string, typeof 
   return result;
 }
 
-function fallbackImpact(event: MarketEventRow, now: Date, rvol: number | null, priceReaction: number | null, sourceQuality: number | null): EventCardDTO["impact"] {
-  const result = computeImpactScore({
-    publishedAt: event.publishedAt ?? now,
-    now,
-    sourceQuality,
-    companyRelevance: num(event.companyRelevance),
-    eventType: event.eventType as EventType,
-    eventImportance: num(event.eventImportance),
-    weightedSurprisePct: null,
-    priceReactionPct: priceReaction,
-    rvol,
-    relativeStrengthPp: null,
-    stockMovePct: priceReaction,
-    etfMovePct: null,
-  });
+function unavailableImpact(): EventCardDTO["impact"] {
   return {
-    score: result.score,
-    band: result.band,
-    components: result.components.map((c) => ({
-      key: c.key,
-      label: c.label,
-      raw: c.raw,
-      normalized: c.normalized,
-      weight: c.weight,
-      points: c.points,
-      explanation: c.explanation,
-    })),
-    algorithm_version: result.algorithmVersion,
+    score: null,
+    band: null,
+    components: [],
+    algorithm_version: "impact-v2",
+    computed_at: null,
+    initial_score: null,
+    initial_computed_at: null,
   };
 }
 
@@ -255,13 +258,13 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
 
   switch (filters.sort) {
     case "published_desc":
-      query.orderBy(desc(marketEvents.publishedAt));
+      query.orderBy(sql`coalesce(${marketEvents.publishedAt}, ${marketEvents.firstReceivedAt}) DESC`);
       break;
     case "impact_asc":
       query.orderBy(sql`${impactScores.score} ASC NULLS LAST`);
       break;
     default:
-      query.orderBy(sql`${impactScores.score} DESC NULLS LAST`, desc(marketEvents.publishedAt));
+      query.orderBy(sql`${impactScores.score} DESC NULLS LAST`, sql`coalesce(${marketEvents.publishedAt}, ${marketEvents.firstReceivedAt}) DESC`);
       break;
   }
   query.limit(filters.limit).offset(filters.offset);
@@ -322,7 +325,7 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
           ) ?? null
         : null;
     const lastPrice = num(price?.price);
-    const rvol = reaction?.rvol ?? null;
+    const rvol = num(row.rvolSnapshot);
     const changeSincePub = reaction?.stockMovePct ?? null;
 
     const etRows = tickersMap.get(event.id) ?? [];
@@ -334,11 +337,14 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
       storedScore !== null
         ? {
             score: storedScore,
-            band: (row.band ?? "minimal") as ImpactBand,
+            band: (row.band as ImpactBand | null) ?? (storedScore === null ? null : bandForScore(storedScore)),
             components: componentsMap.get(event.id) ?? [],
-            algorithm_version: row.algorithmVersion ?? "impact-v1",
+            algorithm_version: row.algorithmVersion ?? "impact-v2",
+            computed_at: row.computedAt?.toISOString() ?? null,
+            initial_score: num(row.initialScore),
+            initial_computed_at: row.initialComputedAt?.toISOString() ?? null,
           }
-        : fallbackImpact(event, now, rvol, changeSincePub, num(row.sourceQuality));
+        : unavailableImpact();
 
     data.push({
       id: event.id,
@@ -349,12 +355,15 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
       summary: event.summary ?? "",
       event_type: event.eventType as EventType,
       event_type_label: EVENT_TYPE_LABELS[event.eventType as EventType],
-      published_at: toIso(event.publishedAt),
+      published_at: event.publishedAt?.toISOString() ?? null,
+      received_at: event.firstReceivedAt.toISOString(),
       news_age_minutes: newsAgeMinutes(event.publishedAt, now),
       source: {
-        name: row.sourceName ?? "unknown",
-        tier: row.sourceTier ?? 2,
+        name: row.sourceName,
+        tier: row.sourceTier,
+        quality_score: num(row.sourceQuality),
         quality_label: qualityLabel(num(row.sourceQuality)),
+        ingest_provider: row.ingestProvider,
       },
       sentiment: num(event.sentiment) ?? 0,
       catalyst_direction: directionOrNeutral(event.catalystDirection),
@@ -368,6 +377,13 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
         session: price?.session ?? event.session ?? "closed",
         gap_pct: num(price?.gapPct),
         rvol,
+        rvol_as_of: row.rvolAsOf?.toISOString() ?? null,
+        rvol_session: row.rvolSession,
+        rvol_volume: row.rvolVolume,
+        rvol_expected_volume: num(row.rvolExpectedVolume),
+        rvol_sample_count: row.rvolSampleCount,
+        as_of: price?.ts.toISOString() ?? null,
+        data_status: price ? storedFeedStatus(price.dataStatus, price.ts, "market", now) : "UNAVAILABLE",
         vwap: num(technical?.vwap) ?? num(price?.vwap),
         atr_pct: atrPctFromTechnical(technical, lastPrice),
       },
@@ -401,15 +417,20 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
   };
 }
 
-async function sourcesForEvent(eventId: string): Promise<SourceDTO[]> {
+async function sourcesForEvent(eventId: string, claimHeadline: string): Promise<SourceDTO[]> {
   const rows = await getDb()
     .select({
       headline: newsArticles.headline,
       url: newsArticles.url,
+      body: newsArticles.body,
       publishedAt: newsArticles.publishedAt,
+      receivedAt: newsArticles.firstReceivedAt,
       isPrimary: eventArticles.isPrimary,
+      isNewInformation: eventArticles.isNewInformation,
       sourceName: newsSources.name,
       tier: newsSources.tier,
+      quality: newsSources.qualityScore,
+      ingestProvider: newsArticles.ingestProvider,
     })
     .from(eventArticles)
     .innerJoin(newsArticles, eq(eventArticles.articleId, newsArticles.id))
@@ -420,11 +441,25 @@ async function sourcesForEvent(eventId: string): Promise<SourceDTO[]> {
   return rows.map((r) => ({
     title: r.headline,
     url: r.url,
-    source_name: r.sourceName ?? "unknown",
-    tier: r.tier ?? 2,
-    published_at: toIso(r.publishedAt),
+    source_name: r.sourceName,
+    tier: r.tier,
+    quality_score: num(r.quality),
+    ingest_provider: r.ingestProvider,
+    published_at: r.publishedAt?.toISOString() ?? null,
+    received_at: r.receivedAt.toISOString(),
+    excerpt: verbatimExcerpt(r.body, claimHeadline),
+    is_new_information: r.isNewInformation,
     is_primary: r.isPrimary,
   }));
+}
+
+function verbatimExcerpt(body: string | null, claimHeadline: string): string | null {
+  if (!body) return null;
+  const sentences = body.match(/[^.!?]+[.!?]+|[^.!?]+$/g)?.map((sentence) => sentence.trim()) ?? [];
+  const guidanceClaim = /guidance|outlook|forecast|raises|raised|lifts|lifted/i.test(claimHeadline);
+  const evidencePattern = guidanceClaim ? /guidance|outlook|forecast|raise[sd]?|lift(?:s|ed)?/i : null;
+  const sentence = evidencePattern ? sentences.find((item) => evidencePattern.test(item)) : sentences[0];
+  return sentence && sentence.length <= 360 ? sentence : null;
 }
 
 async function latestVixRows(limit: number): Promise<(typeof macroSnapshots.$inferSelect)[]> {
@@ -449,7 +484,7 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
   const event = row.event;
   const ticker = event.ticker;
 
-  const priceTickers = [ticker, row.sectorEtf, "SPY", "QQQ"].filter(
+  const priceTickers = [ticker, row.sectorEtf, "SPY", "QQQ", "SOXX", "XLK", "XLC", "XLY"].filter(
     (t): t is string => typeof t === "string" && t.length > 0,
   );
   const priceSnaps = await latestPriceSnapshots(db, priceTickers);
@@ -471,7 +506,7 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
           reactionRequestKey({ ticker, publishedAt: event.publishedAt, sectorSlug: row.sectorSlug }),
         ) ?? null
       : null;
-  const rvol = reactionInputs?.rvol ?? null;
+  const rvol = num(row.rvolSnapshot);
   const changeSincePub = reactionInputs?.stockMovePct ?? null;
 
   // Components and related tickers for this single event, fetched together.
@@ -482,8 +517,14 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
   const storedScore = num(row.score);
   const impact: EventCardDTO["impact"] =
     storedScore !== null
-      ? { score: storedScore, band: (row.band ?? "minimal") as ImpactBand, components, algorithm_version: row.algorithmVersion ?? "impact-v1" }
-      : fallbackImpact(event, now, rvol, changeSincePub, num(row.sourceQuality));
+      ? {
+          score: storedScore, band: (row.band as ImpactBand | null) ?? (storedScore === null ? null : bandForScore(storedScore)), components,
+          algorithm_version: row.algorithmVersion ?? "impact-v2",
+          computed_at: row.computedAt?.toISOString() ?? null,
+          initial_score: num(row.initialScore),
+          initial_computed_at: row.initialComputedAt?.toISOString() ?? null,
+        }
+      : unavailableImpact();
 
   const sectorEtfViewValue = sectorEtfView(row.sectorEtf, priceSnaps.get(row.sectorEtf ?? ""));
 
@@ -496,9 +537,10 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
     summary: event.summary ?? "",
     event_type: event.eventType as EventType,
     event_type_label: EVENT_TYPE_LABELS[event.eventType as EventType],
-    published_at: toIso(event.publishedAt),
+    published_at: event.publishedAt?.toISOString() ?? null,
+    received_at: event.firstReceivedAt.toISOString(),
     news_age_minutes: newsAgeMinutes(event.publishedAt, now),
-    source: { name: row.sourceName ?? "unknown", tier: row.sourceTier ?? 2, quality_label: qualityLabel(num(row.sourceQuality)) },
+    source: { name: row.sourceName, tier: row.sourceTier, quality_score: num(row.sourceQuality), quality_label: qualityLabel(num(row.sourceQuality)), ingest_provider: row.ingestProvider },
     sentiment: num(event.sentiment) ?? 0,
     catalyst_direction: directionOrNeutral(event.catalystDirection),
     relevance_score: num(event.companyRelevance) ?? 0,
@@ -511,6 +553,13 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       session: price?.session ?? event.session ?? "closed",
       gap_pct: num(price?.gapPct),
       rvol,
+      rvol_as_of: row.rvolAsOf?.toISOString() ?? null,
+      rvol_session: row.rvolSession,
+      rvol_volume: row.rvolVolume,
+      rvol_expected_volume: num(row.rvolExpectedVolume),
+      rvol_sample_count: row.rvolSampleCount,
+      as_of: price?.ts.toISOString() ?? null,
+        data_status: price ? storedFeedStatus(price.dataStatus, price.ts, "market", now) : "UNAVAILABLE",
       vwap: num(technical?.vwap) ?? num(price?.vwap),
       atr_pct: atrPctFromTechnical(technical, lastPrice),
     },
@@ -527,9 +576,27 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
   };
 
   const earnings = ticker
-    ? await db.select().from(earningsResult).where(eq(earningsResult.ticker, ticker)).orderBy(desc(earningsResult.reportedAt)).limit(1)
+    ? await db.select().from(earningsResult).where(and(eq(earningsResult.ticker, ticker), eq(earningsResult.eventId, event.id))).limit(1)
     : [];
   const earn = earnings[0];
+  const expectationRows = ticker && event.fiscalPeriod
+    ? await db.select().from(fundamentalExpectations).where(and(
+        eq(fundamentalExpectations.ticker, ticker),
+        eq(fundamentalExpectations.fiscalPeriod, event.fiscalPeriod),
+      ))
+    : [];
+  const expectations = new Map(expectationRows.map((item) => [item.metric, item]));
+  const epsEstimate = expectations.get("eps");
+  const revenueEstimate = expectations.get("revenue");
+  const epsConsensus = num(earn?.epsConsensus) ?? num(epsEstimate?.consensus);
+  const revenueConsensus = num(earn?.revenueConsensus) ?? num(revenueEstimate?.consensus);
+  const epsActual = num(earn?.epsActual);
+  const revenueActual = num(earn?.revenueActual);
+  const sourceEvidence = await sourcesForEvent(id, event.headline);
+  const guidanceClaim = /guidance|outlook|forecast|raises|raised|lifts|lifted/i.test(`${event.headline} ${event.summary ?? ""}`);
+  const hasGuidanceFigures = (earn?.guidanceActual !== null && earn?.guidanceActual !== undefined)
+    || (earn?.guidanceConsensus !== null && earn?.guidanceConsensus !== undefined);
+  const guidanceUnverified = guidanceClaim && !hasGuidanceFigures && !sourceEvidence.some((source) => source.excerpt !== null);
 
   const macroRows = await db.select().from(macroSnapshots).orderBy(desc(macroSnapshots.ts)).limit(48);
   const macroLatest = new Map<string, (typeof macroSnapshots.$inferSelect)>();
@@ -538,7 +605,8 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       macroLatest.set(m.series, m);
     }
   }
-  const macroPoints: MacroPoint[] = [...macroLatest.values()].map((m) => {
+  const trackedEtfs = new Set(["SOXX", "XLK", "XLC", "XLY"]);
+  const macroPoints: MacroPoint[] = [...macroLatest.values()].filter((m) => !trackedEtfs.has(m.series)).map((m) => {
     const value = Number(m.value);
     const previous = num(m.previousValue);
     return {
@@ -551,6 +619,15 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
   });
   const vixRows = await latestVixRows(20);
   const vixMean = vixRows.length > 0 ? vixRows.reduce((acc, r) => acc + Number(r.value), 0) / vixRows.length : null;
+
+  for (const symbol of trackedEtfs) {
+    const snapshot = priceSnaps.get(symbol);
+    const value = num(snapshot?.price ?? null);
+    const previous = num(snapshot?.prevClose ?? null);
+    if (value !== null && previous !== null) {
+      macroPoints.push({ series: symbol as MacroPoint["series"], value, previousValue: previous, change: num(snapshot?.changePctDaily ?? null), unit: "%" });
+    }
+  }
 
   const optionRow = ticker
     ? (await db.select().from(optionsSnapshots).where(eq(optionsSnapshots.ticker, ticker)).orderBy(desc(optionsSnapshots.ts)).limit(1))[0] ?? null
@@ -579,7 +656,7 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       time: Math.floor((m.publishedAt as Date).getTime() / 1000),
       label: EVENT_TYPE_LABELS[m.eventType as EventType],
       event_id: m.id,
-      impact_score: num(m.score) ?? 0,
+      impact_score: num(m.score),
       catalyst_direction: m.catalystDirection,
     }));
 
@@ -591,33 +668,57 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       event_type_label: EVENT_TYPE_LABELS[event.eventType as EventType],
       catalyst_direction: event.catalystDirection,
       sentiment: num(event.sentiment) ?? 0,
-      published_at: toIso(event.publishedAt),
+      published_at: event.publishedAt?.toISOString() ?? null,
+      received_at: event.firstReceivedAt.toISOString(),
       session: event.session,
       ticker,
       company_name: row.companyName,
       sector: row.sectorSlug,
-      source: { name: row.sourceName ?? "unknown", tier: row.sourceTier ?? 2, quality_label: qualityLabel(num(row.sourceQuality)) },
+      source: { name: row.sourceName, tier: row.sourceTier, quality_score: num(row.sourceQuality), quality_label: qualityLabel(num(row.sourceQuality)), ingest_provider: row.ingestProvider },
       article_count: event.articleCount ?? 1,
     },
     what_happened: event.summary ?? event.headline,
     why_it_matters: event.reasoning ?? event.summary ?? "",
     expectation_vs_actual: {
-      eps_surprise_pct: num(earn?.epsSurprisePct),
-      revenue_surprise_pct: num(earn?.revenueSurprisePct),
-      guidance_surprise_pct: num(earn?.guidanceSurprisePct),
+      eps_surprise_pct: epsActual !== null && epsConsensus !== null
+        ? surprisePct(epsActual, epsConsensus).surprisePct : null,
+      revenue_surprise_pct: revenueActual !== null && revenueConsensus !== null
+        ? surprisePct(revenueActual, revenueConsensus).surprisePct : null,
+      guidance_surprise_pct: earn?.guidanceActual !== null && earn?.guidanceActual !== undefined && earn?.guidanceConsensus !== null && earn?.guidanceConsensus !== undefined
+        ? surprisePct(Number(earn.guidanceActual), Number(earn.guidanceConsensus)).surprisePct : null,
       expected: {
-        eps: num(earn?.epsConsensus),
-        revenue: num(earn?.revenueConsensus),
+        eps: epsConsensus,
+        revenue: revenueConsensus,
         guidance: num(earn?.guidanceConsensus),
       },
       actual: {
-        eps: num(earn?.epsActual),
-        revenue: num(earn?.revenueActual),
+        eps: epsActual,
+        revenue: revenueActual,
         guidance: num(earn?.guidanceActual),
       },
-      note: earn
-        ? "Consensus figures are as of the latest available estimate period."
-        : "No earnings record is linked to this event.",
+      fiscal_period: earn?.fiscalPeriod ?? event.fiscalPeriod ?? null,
+      reported_at: earn?.reportedAt?.toISOString() ?? null,
+      units: { eps: earn?.epsUnit ?? epsEstimate?.unit ?? null, revenue: earn?.revenueUnit ?? revenueEstimate?.unit ?? null },
+      currencies: { eps: earn?.epsCurrency ?? epsEstimate?.currency ?? null, revenue: earn?.revenueCurrency ?? revenueEstimate?.currency ?? null },
+      eps_type: earn?.epsType ?? epsEstimate?.epsType ?? null,
+      consensus_source: earn?.consensusSource ?? epsEstimate?.source ?? revenueEstimate?.source ?? null,
+      provider: earn?.provider ?? epsEstimate?.provider ?? revenueEstimate?.provider ?? null,
+      data_status: earn
+        ? storedFeedStatus(earn.dataStatus, earn.updatedAt, "fundamental", now)
+        : epsEstimate
+          ? storedFeedStatus(epsEstimate.dataStatus, epsEstimate.updatedAt, "fundamental", now)
+          : revenueEstimate
+            ? storedFeedStatus(revenueEstimate.dataStatus, revenueEstimate.updatedAt, "fundamental", now)
+            : "UNAVAILABLE",
+      note: guidanceUnverified
+        ? "Guidance claim is unverified: there are no guidance figures or a matching verbatim source excerpt."
+        : earn
+        ? earn.guidanceActual === null && earn.guidanceConsensus === null
+          ? "Actual and consensus figures are linked to this event and fiscal period. Guidance figures are unavailable unless supported by numbers or a verbatim article excerpt."
+          : "Figures are linked to this event and fiscal period."
+        : epsEstimate || revenueEstimate
+          ? "Consensus estimates are linked to this event and fiscal period; actual figures are unavailable. Guidance requires figures or a verbatim article excerpt."
+          : "No FMP estimate or earnings record is linked to this ticker and fiscal period.",
     },
     price_reaction: {
       at_publication: reactionInputs?.reaction.atPublication.price ?? null,
@@ -627,8 +728,8 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       reaction_30m: reactionInputs?.reaction.reaction30m ?? null,
       reaction_60m: reactionInputs?.reaction.reaction60m ?? null,
       reaction_daily: reactionInputs?.reaction.reactionDaily ?? null,
-      volume: reactionInputs?.cumulativeVolume ?? null,
-      rvol: reactionInputs?.rvol ?? null,
+      volume: row.rvolVolume,
+      rvol,
       vwap: reactionInputs?.reaction.vwap ?? num(technical?.vwap),
       atr_pct: atrPctFromTechnical(technical, lastPrice) ?? reactionInputs?.reaction.atrPct ?? null,
       gap_pct: reactionInputs?.reaction.gapPct ?? num(price?.gapPct),
@@ -636,10 +737,14 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       trough_60m: reactionInputs?.reaction.trough60m ?? null,
     },
     volume_reaction: {
-      cumulative: reactionInputs?.cumulativeVolume ?? null,
-      expected_to_date: reactionInputs?.expectedVolumeToDate ?? null,
-      rvol: reactionInputs?.rvol ?? null,
-      profile: reactionInputs?.rvol !== null && reactionInputs?.rvol !== undefined && reactionInputs.rvol >= 1.5 ? "elevated" : "normal",
+      cumulative: row.rvolVolume,
+      expected_to_date: num(row.rvolExpectedVolume),
+      rvol,
+      profile: rvol === null ? "unavailable" : rvol >= 1.5 ? "elevated" : "normal",
+      session: row.rvolSession,
+      as_of: row.rvolAsOf?.toISOString() ?? null,
+      sample_count: row.rvolSampleCount,
+      data_status: ticker ? storedFeedStatus(price?.dataStatus, price?.ts, "market", now) : "UNAVAILABLE",
     },
     sector_reaction: {
       sector_etf: row.sectorEtf,
@@ -666,10 +771,26 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
       conditions: technical?.conditions ?? [],
     },
     macro: Object.fromEntries(
-      macroPoints.map((m) => [
+      [
+      ...macroPoints.filter((m) => !trackedEtfs.has(m.series)).map((m) => [
         m.series,
-        { value: m.value, previous: m.previousValue ?? null, change: m.change ?? null, unit: m.unit ?? null, as_of: toIso(macroLatest.get(m.series)?.ts) },
+        { value: m.value, previous: m.previousValue ?? null, change: m.change ?? null, unit: m.unit ?? null, as_of: toIso(macroLatest.get(m.series)?.ts), data_status: macroLatest.get(m.series)?.dataStatus ?? "UNAVAILABLE" },
       ]),
+      ...[...trackedEtfs].map((symbol) => {
+        const snapshot = priceSnaps.get(symbol);
+        const previous = num(snapshot?.prevClose ?? null);
+        return [symbol, {
+          value: num(snapshot?.price ?? null),
+          previous,
+          change: num(snapshot?.changePctDaily ?? null),
+          unit: "%",
+          as_of: snapshot?.ts.toISOString() ?? null,
+          reference_price: previous,
+          reference_period: "daily vs prior regular-session close",
+          data_status: storedFeedStatus(snapshot?.dataStatus, snapshot?.ts, "market", now),
+        }];
+      }),
+      ],
     ),
     regime: macroPoints.length > 0 ? deriveRegime(macroPoints, { vixMean }) : null,
     options: optionRow
@@ -681,11 +802,18 @@ export async function getEventDetail(id: string): Promise<{ event: EventCardDTO;
         }
       : null,
     timeline: [
-      { ts: toIso(event.publishedAt), label: "Event published", kind: "event" },
+      ...(event.publishedAt ? [{ ts: event.publishedAt.toISOString(), label: "Event published", kind: "event" }] : []),
+      { ts: event.firstReceivedAt.toISOString(), label: "First received", kind: "received" },
       { ts: toIso(event.latestUpdateAt), label: "Last update", kind: "update" },
     ],
-    sources: await sourcesForEvent(id),
+    sources: sourceEvidence,
     impact_breakdown: impact.components,
+    impact_score: {
+      current: storedScore,
+      computed_at: row.computedAt?.toISOString() ?? null,
+      initial: num(row.initialScore),
+      initial_computed_at: row.initialComputedAt?.toISOString() ?? null,
+    },
     intraday: {
       bars: bars.map((b) => ({
         time: b.time,

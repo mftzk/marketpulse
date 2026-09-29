@@ -8,7 +8,7 @@ import type { EventType } from "@/lib/core/event-types";
  * Article fingerprint: `sha256(ticker|provider|url-or-headline|published_date_hour)`
  * for raw storage. Event clustering: two classifications belong to the same
  * canonical event when they share the same primary ticker AND the same
- * event_type AND `|published_at delta| ≤ 90 min` AND
+ * event_type AND `|published_at delta| ≤ 24 h` AND
  * (`tokenJaccard(headline) ≥ 0.45` OR `trigramSimilarity(headline) ≥ 0.6`).
  *
  * Token normalisation: lowercase, strip punctuation/stopwords, drop number-only
@@ -174,10 +174,14 @@ function sameEvent(a: DedupeClassification, b: DedupeClassification): boolean {
     return false;
   }
   const delta = Math.abs(a.publishedAt.getTime() - b.publishedAt.getTime());
-  if (delta > 90 * 60_000) {
+  if (delta > 24 * 60 * 60_000) {
     return false;
   }
-  return tokenJaccard(a.headline, b.headline) >= 0.45 || trigramSimilarity(a.headline, b.headline) >= 0.6;
+  return headlinesReferToSameEvent(a.headline, b.headline);
+}
+
+export function headlinesReferToSameEvent(a: string, b: string): boolean {
+  return tokenJaccard(a, b) >= 0.45 || trigramSimilarity(a, b) >= 0.6;
 }
 
 /**
