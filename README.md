@@ -237,7 +237,11 @@ INSERT INTO users (email, display_name, password_hash) VALUES ('you@example.com'
 Each tick runs nine idempotent steps, recorded in `pipeline_jobs`
 (`UNIQUE(run_id, name)`, max 3 attempts, exponential backoff):
 
-1. `fetch_news` — `NewsProvider.list` → upsert `news_articles` by `hash`
+1. `fetch_news` — `NewsProvider.list` → upsert `news_articles` by `hash`. The lookback window is
+   `NEWS_LOOKBACK_MINUTES` (default 240). Vendor feeds return a single **ascending** page
+   (`pageSize=100`), so a window wider than one page would only replay the oldest, already-stored
+   articles and never see fresh ones; the step reports `fetched` and `ingested` independently and
+   logs `news_window_saturated` when the page is full, advising a narrower window.
 2. `normalize_news` — trim/normalise, resolve source, stamp `published_at`, derive session
 3. `detect_ticker` — cashtag/name/symbol detection against the active universe
 4. `classify_event` — LLM in batches of ≤10 with strict schema validation; falls back to
@@ -363,6 +367,7 @@ helpers, and API DTO contracts. No network or database is touched.
 3. Environment:
    ```
    NEWS_MODE=live
+   NEWS_LOOKBACK_MINUTES=240
    PIPELINE_AUTORUN=1
    PIPELINE_TICK_SECONDS=30
    PIPELINE_TICK_DEADLINE_MS=90000

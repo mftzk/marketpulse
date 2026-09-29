@@ -104,6 +104,13 @@ export interface Config {
    * every refresh only wastes the request budget.
    */
   fmpUnsupportedCooldownMs: number;
+  /**
+   * Lookback window (minutes) for the `fetch_news` step. Vendor adapters return
+   * a single ascending page (pageSize=100), so this must be narrow enough that
+   * the whole window fits in one page; otherwise only already-stored articles
+   * are seen (`news_window_saturated`).
+   */
+  newsLookbackMinutes: number;
   pipelineAutorun: boolean;
   pipelineTickSeconds: number;
   /** Hard ceiling for a single pipeline tick (ms). Exceeded → failed, lock released. */
@@ -189,6 +196,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   );
   const pipelineMaxEventsPerTick = parsePositiveInt(nonEmpty(env.PIPELINE_MAX_EVENTS_PER_TICK), 40);
   const providerHttpTimeoutMs = parsePositiveInt(nonEmpty(env.PROVIDER_HTTP_TIMEOUT_MS), 8_000);
+  const newsLookbackMinutes = parsePositiveInt(nonEmpty(env.NEWS_LOOKBACK_MINUTES), 240);
 
   // Auth is enabled unless explicitly disabled. A missing/short secret never
   // throws at import time (that would break `next build`, which has no runtime
@@ -231,6 +239,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     pipelineMarketMaxBarsPerTicker,
     pipelineMaxEventsPerTick,
     providerHttpTimeoutMs,
+    newsLookbackMinutes,
     logLevel,
     appUrl,
     isProduction: nonEmpty(env.NODE_ENV) === "production",

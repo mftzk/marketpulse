@@ -105,6 +105,8 @@ function sleep(ms: number): Promise<void> {
  * `skipped_no_budget`) and `db_queries`.
  */
 const STEP_COUNTER_KEYS = [
+  "fetched",
+  "ingested",
   "llm_calls",
   "classified",
   "circuit_open",

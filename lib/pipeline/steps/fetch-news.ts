@@ -10,7 +10,17 @@ import type { JobResult } from "@/lib/pipeline/registry";
  * → idempotent).
  */
 
-const LOOKBACK_MINUTES = 60 * 24 * 2;
+/**
+ * The vendor adapters request a single ascending page of at most 100 items
+ * (`pageSize=100`, e.g. `lib/providers/benzinga.ts`). Because the page is
+ * ascending (oldest first), a lookback window that holds more than one page
+ * returns only the *oldest* articles in the window — which are already stored —
+ * so `ingested` stays 0 forever and genuinely fresh articles are never seen
+ * (production incident 2026-09-30). The window is therefore configurable via
+ * `NEWS_LOOKBACK_MINUTES` (default 240) and must stay narrow enough to fit
+ * inside one page; a saturated response logs `news_window_saturated`.
+ */
+const NEWS_PROVIDER_PAGE_SIZE = 100;
 
 function articleHash(input: {
   tickersRaw: string[];
@@ -48,8 +58,21 @@ export async function fetchNews(ctx: PipelineContext): Promise<JobResult> {
         },
       });
     }
-    const articles = await ctx.providers.news.list({ sinceMinutes: LOOKBACK_MINUTES });
+    const articles = await ctx.providers.news.list({ sinceMinutes: ctx.config.newsLookbackMinutes });
+    const fetched = articles.length;
     let ingested = 0;
+
+    if (fetched >= NEWS_PROVIDER_PAGE_SIZE) {
+      ctx.logger.warn("news_window_saturated", {
+        event: "pipeline.run",
+        run_id: ctx.runId,
+        provider: ctx.config.newsProvider,
+        fetched,
+        page_size: NEWS_PROVIDER_PAGE_SIZE,
+        lookback_minutes: ctx.config.newsLookbackMinutes,
+        advice: "narrow NEWS_LOOKBACK_MINUTES so the window fits inside a single page",
+      });
+    }
 
     for (const article of articles) {
       const inserted = await ctx.db
@@ -85,6 +108,8 @@ export async function fetchNews(ctx: PipelineContext): Promise<JobResult> {
       status: "succeeded",
       durationMs: Date.now() - started,
       processed: ingested,
+      rowsWritten: ingested,
+      context: { fetched, ingested },
     };
   } catch (err) {
     return {
