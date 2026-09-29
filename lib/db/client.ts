@@ -55,25 +55,44 @@ function withTimestampSafety(client: Sql): Sql {
   });
 }
 
-function createDb(): Db {
+interface DbGlobals {
+  __marketpulseDb?: Db;
+  __marketpulseRaw?: Sql;
+}
+
+const globalForDb = globalThis as unknown as DbGlobals;
+
+function connect(): void {
+  if (globalForDb.__marketpulseDb) {
+    return;
+  }
   if (!config.databaseUrl) {
     throw new Error("DATABASE_URL is not configured");
   }
   const client = postgres(config.databaseUrl, { max: 3, prepare: false });
-  return drizzle(withTimestampSafety(client), { schema });
+  globalForDb.__marketpulseRaw = client;
+  globalForDb.__marketpulseDb = drizzle(withTimestampSafety(client), { schema });
 }
-
-const globalForDb = globalThis as unknown as { __marketpulseDb?: Db };
 
 /**
  * Singleton database handle, cached on `globalThis` so hot-reloads and multiple
  * modules share one connection pool.
  */
 export function getDb(): Db {
-  if (!globalForDb.__marketpulseDb) {
-    globalForDb.__marketpulseDb = createDb();
-  }
-  return globalForDb.__marketpulseDb;
+  connect();
+  return globalForDb.__marketpulseDb as Db;
+}
+
+/**
+ * The underlying `postgres` client (not the Drizzle proxy). Needed to
+ * `reserve()` a single connection so session-scoped state — notably
+ * `pg_try_advisory_lock` — is acquired and released on the SAME connection.
+ * Using Drizzle's pooled `db.execute` for the unlock leaked the lock across
+ * pool connections (production incident 2026-09-29).
+ */
+export function getRawClient(): Sql {
+  connect();
+  return globalForDb.__marketpulseRaw as Sql;
 }
 
 export { normalizeParam, normalizeParams };

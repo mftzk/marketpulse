@@ -13,6 +13,14 @@ const BASE_URL = (process.env.BASE_URL || process.argv[2] || "http://127.0.0.1:3
   /\/$/,
   "",
 );
+const REQUEST_TIMEOUT_MS = Number(process.env.SMOKE_TIMEOUT_MS || 30000);
+/**
+ * The synchronous trigger (`wait: true`) waits for a whole pipeline tick, which
+ * legitimately takes ~40s on the production container — longer than the default
+ * request timeout. It gets its own budget so a slow-but-healthy tick is not
+ * reported as a failure (a wedged endpoint still fails, just later).
+ */
+const TRIGGER_TIMEOUT_MS = Number(process.env.SMOKE_TRIGGER_TIMEOUT_MS || 180000);
 const SMOKE_EMAIL =
   process.env.SMOKE_EMAIL || process.env.ADMIN_EMAIL || "zakaria@nrapken.dev";
 const SMOKE_PASSWORD = process.env.SMOKE_PASSWORD || "";
@@ -36,8 +44,27 @@ function authHeaders(extra = {}) {
   return state.sessionCookie ? { cookie: state.sessionCookie, ...extra } : { ...extra };
 }
 
+/**
+ * `fetch` with a hard per-request timeout. Without this a single wedged
+ * endpoint (historically the synchronous `POST /api/pipeline/run`) blocked the
+ * whole harness until an external shell timeout.
+ */
+async function fetchWithTimeout(url, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  try {
+    return await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    const reason =
+      err && err.name === "TimeoutError"
+        ? `timeout after ${REQUEST_TIMEOUT_MS}ms`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    throw new Error(reason);
+  }
+}
+
 async function getJson(path) {
-  const response = await fetch(`${BASE_URL}${path}`, { headers: authHeaders() });
+  const response = await fetchWithTimeout(`${BASE_URL}${path}`, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`GET ${path} -> HTTP ${response.status}`);
   }
@@ -107,7 +134,7 @@ const DETAIL_SECTIONS = [
 ];
 
 await check("POST /api/auth/login (admin account)", async () => {
-  const response = await fetch(`${BASE_URL}/api/auth/login`, {
+  const response = await fetchWithTimeout(`${BASE_URL}/api/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email: SMOKE_EMAIL, password: SMOKE_PASSWORD }),
@@ -122,7 +149,7 @@ await check("POST /api/auth/login (admin account)", async () => {
 });
 
 await check("GET /api/events without a session -> 401", async () => {
-  const response = await fetch(`${BASE_URL}/api/events?limit=1`);
+  const response = await fetchWithTimeout(`${BASE_URL}/api/events?limit=1`);
   assert(response.status === 401, `HTTP ${response.status}`);
   const body = await response.json();
   assert(body.code === "unauthorized", `code ${body.code}`);
@@ -130,7 +157,7 @@ await check("GET /api/events without a session -> 401", async () => {
 });
 
 await check("GET /api/health without a session -> 200", async () => {
-  const response = await fetch(`${BASE_URL}/api/health`);
+  const response = await fetchWithTimeout(`${BASE_URL}/api/health`);
   assert(response.status === 200, `HTTP ${response.status}`);
   return "200 ok";
 });
@@ -239,18 +266,34 @@ await check("GET /api/pipeline/status", async () => {
   return `enabled=${status.scheduler.enabled}`;
 });
 
-await check("POST /api/pipeline/run", async () => {
-  const response = await fetch(`${BASE_URL}/api/pipeline/run`, {
-    method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ trigger: "api" }),
-  });
+await check("POST /api/pipeline/run (sync wait:true)", async () => {
+  const response = await fetchWithTimeout(
+    `${BASE_URL}/api/pipeline/run`,
+    {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ trigger: "api", wait: true }),
+    },
+    TRIGGER_TIMEOUT_MS,
+  );
   assert(response.ok, `HTTP ${response.status}`);
   const run = (await response.json()).data;
   assert(run.status !== "failed", `run status ${run.status}`);
   const failed = (run.steps ?? []).filter((step) => step.status === "failed");
   assert(failed.length === 0, `failed steps: ${failed.map((s) => s.name).join(", ")}`);
   return `status=${run.status} steps=${run.steps.length}`;
+});
+
+await check("POST /api/pipeline/run (async -> 202)", async () => {
+  const response = await fetchWithTimeout(`${BASE_URL}/api/pipeline/run`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ trigger: "api" }),
+  });
+  assert(response.status === 202, `expected 202, got HTTP ${response.status}`);
+  const run = (await response.json()).data;
+  assert(["started", "skipped"].includes(run.status), `unexpected status ${run.status}`);
+  return `status=${run.status}`;
 });
 
 await check("GET /api/replay?date=<today>", async () => {

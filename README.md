@@ -211,10 +211,22 @@ Each tick runs nine idempotent steps, recorded in `pipeline_jobs`
 8. `calculate_impact_score` — deterministic score + components (delete+insert = idempotent)
 9. `evaluate_alerts` — rule matching with per-rule cooldown
 
-`runPipelineTick` is guarded by an advisory lock so concurrent triggers skip instead of
-double-processing. The in-process scheduler (`lib/pipeline/scheduler.ts`, started from
-`instrumentation.ts` when `PIPELINE_AUTORUN=1`) catches all errors so a failure can never crash
-the server.
+`runPipelineTick` is guarded by `pg_try_advisory_lock`, so concurrent triggers skip instead of
+double-processing. Because the lock is **session-scoped**, the tick `reserve()`s one physical
+connection from the pool and acquires/releases the lock on that same connection — using pooled
+`db.execute()` sent the acquire and the unlock to different connections and leaked the lock
+(production incident 2026-09-29). The in-process scheduler (`lib/pipeline/scheduler.ts`, started
+from `instrumentation.ts` when `PIPELINE_AUTORUN=1`) catches all errors so a failure can never
+crash the server.
+
+Every tick runs under a hard deadline (`PIPELINE_TICK_DEADLINE_MS`, default 90 s). When exceeded
+the in-flight job and the run are marked `failed`, the advisory lock is released and the tick
+returns instead of hanging. A run left `running` longer than `max(3 × deadline, 5 min)` is
+**stale**: the next tick marks it `failed` with `stale: holder disappeared`, and `/api/health` +
+`/api/pipeline/status` expose `running` / `stale` booleans so an operator can tell "actually
+working" from "wedged". `POST /api/pipeline/run` returns `202` immediately and runs the tick in
+the background behind an in-process single-flight guard; pass `{ "wait": true }` (or `?wait=1`)
+for the synchronous report.
 
 ---
 
@@ -265,8 +277,8 @@ mutate.
 | PATCH/DELETE | `/api/alerts/{id}` | |
 | GET | `/api/market/context` | indices, sectors, macro, regime, breadth |
 | GET | `/api/sectors/{slug}` | sector detail + top events |
-| GET | `/api/pipeline/status` | scheduler + recent runs |
-| POST | `/api/pipeline/run` | worker entrypoint; rate-limited |
+| GET | `/api/pipeline/status` | scheduler + recent runs + `running`/`stale` |
+| POST | `/api/pipeline/run` | worker entrypoint; rate-limited; `202` async by default, `{ wait: true }` sync |
 | GET | `/api/replay` | `?date=YYYY-MM-DD` |
 | GET | `/api/search` | `?q=` ticker + event quick search |
 
@@ -309,6 +321,7 @@ helpers, and API DTO contracts. No network or database is touched.
    NEWS_MODE=live
    PIPELINE_AUTORUN=1
    PIPELINE_TICK_SECONDS=30
+   PIPELINE_TICK_DEADLINE_MS=90000
    AUTH_ENABLED=1
    SESSION_SECRET=<at least 32 random characters>
    ADMIN_EMAIL=zakaria@nrapken.dev

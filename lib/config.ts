@@ -97,6 +97,8 @@ export interface Config {
   fmpApiKey: string | null;
   pipelineAutorun: boolean;
   pipelineTickSeconds: number;
+  /** Hard ceiling for a single pipeline tick (ms). Exceeded → failed, lock released. */
+  pipelineTickDeadlineMs: number;
   logLevel: LogLevel;
   appUrl: string | null;
   isProduction: boolean;
@@ -132,6 +134,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
 
   const logLevel = parseLogLevel(nonEmpty(env.LOG_LEVEL));
   const pipelineTickSeconds = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_SECONDS), 30);
+  const pipelineTickDeadlineMs = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_DEADLINE_MS), 90_000);
 
   // Auth is enabled unless explicitly disabled. A missing/short secret never
   // throws at import time (that would break `next build`, which has no runtime
@@ -162,6 +165,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     fmpApiKey,
     pipelineAutorun: parseBoolean(nonEmpty(env.PIPELINE_AUTORUN), false),
     pipelineTickSeconds,
+    pipelineTickDeadlineMs,
     logLevel,
     appUrl,
     isProduction: nonEmpty(env.NODE_ENV) === "production",

@@ -4,6 +4,7 @@ import { config } from "@/lib/config";
 import { getLlmHealth } from "@/lib/analysis/llm-client";
 import { getDb } from "@/lib/db/client";
 import { earningsResult, fundamentalExpectations, macroSnapshots, newsArticles, pipelineRuns, priceSnapshots } from "@/lib/db/schema";
+import { findRunLiveness, recoverStaleRuns } from "@/lib/pipeline/liveness";
 import { getSchedulerStatus } from "@/lib/pipeline/scheduler";
 import { feedProviderName, feedStatus, storedFeedStatus } from "@/lib/providers";
 
@@ -34,6 +35,14 @@ export async function getHealth(): Promise<Record<string, unknown>> {
     } catch {
       dbOk = false;
     }
+  }
+
+  // Snapshot liveness first (health must report `stale: true` even though we
+  // then persist the recovery) and best-effort recover wedged `running` rows so
+  // `last_status` can never say "running" forever. `recoverStaleRuns` never throws.
+  const liveness = await findRunLiveness(db);
+  if (liveness.staleRunIds.length > 0) {
+    await recoverStaleRuns(db);
   }
 
   // One aggregate query replaces the four count(*) round-trips plus the
@@ -99,10 +108,13 @@ export async function getHealth(): Promise<Record<string, unknown>> {
     },
     pipeline: {
       last_run_at: lastRun?.startedAt?.toISOString() ?? null,
-      last_status: lastRun?.status ?? null,
+      // A stale `running` row must never make health report "running" forever.
+      last_status: lastRun && liveness.staleRunIds.includes(lastRun.id) ? "failed" : lastRun?.status ?? null,
       last_duration_ms: lastRun?.durationMs ?? null,
       runs_last_hour: stats?.runs_last_hour ?? 0,
       failed_jobs: stats?.failed_jobs ?? 0,
+      running: liveness.running,
+      stale: liveness.stale,
       scheduler: { enabled: scheduler.enabled, interval_seconds: scheduler.intervalSeconds },
     },
     counts,
