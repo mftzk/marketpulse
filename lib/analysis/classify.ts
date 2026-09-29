@@ -30,6 +30,37 @@ export interface ClassifiedArticle {
   source: ClassifySource;
 }
 
+export interface ClassifyOptions {
+  llm: LLMClient;
+  /**
+   * Maximum number of LLM round-trips (batches of ≤10) this tick may perform.
+   * Once exhausted the remaining backlog is left for the next tick.
+   */
+  maxLlmCalls?: number;
+  /** Consecutive LLM failures that open the circuit for the rest of the tick. */
+  failureStreakLimit?: number;
+  /** Absolute epoch-ms after which no new LLM call is started. */
+  deadlineAt?: number;
+}
+
+export interface ClassifyStats {
+  /** LLM round-trips actually made. */
+  llmCalls: number;
+  /** Articles classified this tick (LLM + rules). */
+  classified: number;
+  /** Articles left for a later tick. */
+  deferred: number;
+  /** Deferred articles specifically left because the LLM budget was exhausted. */
+  skippedNoBudget: number;
+  /** Whether the failure-streak circuit opened during this tick. */
+  circuitOpen: boolean;
+}
+
+export interface ClassifyRunResult {
+  results: ClassifiedArticle[];
+  stats: ClassifyStats;
+}
+
 const BATCH_SIZE = 10;
 
 function buildPrompt(items: ClassifyInput[]): string {
@@ -201,23 +232,51 @@ export function classifyByRules(
 }
 
 /**
- * Classifies a batch of articles. Batches into ≤10 items, validates LLM output
- * strictly, and falls back to rules per-batch on any failure. The per-article
- * `source` is `"llm"` or `"rules"`.
+ * Classifies a batch of articles with three bounds that keep a small container
+ * from wedging the whole tick on the LLM:
+ *
+ *  1. **Per-tick call cap** (`maxLlmCalls`) — at most N LLM round-trips; the
+ *     remaining backlog is deferred to the next tick.
+ *  2. **Circuit breaker** (`failureStreakLimit`) — after N consecutive LLM
+ *     failures the LLM is skipped for the rest of the tick and every remaining
+ *     article is classified by the deterministic rules classifier.
+ *  3. **Deadline** (`deadlineAt`) — no new LLM call starts after it.
+ *
+ * LLM output is validated strictly per batch; an invalid envelope counts as a
+ * failure and falls back to rules for that batch. Per-article `source` is
+ * `"llm"` or `"rules"`.
  */
 export async function classifyArticles(
   items: ClassifyInput[],
-  opts: { llm: LLMClient },
-): Promise<ClassifiedArticle[]> {
+  opts: ClassifyOptions,
+): Promise<ClassifyRunResult> {
   const results: ClassifiedArticle[] = [];
   const useLLM = opts.llm.isConfigured();
+  const maxLlmCalls = opts.maxLlmCalls ?? Number.POSITIVE_INFINITY;
+  const failureStreakLimit = Math.max(1, opts.failureStreakLimit ?? 3);
+  const deadlineAt = opts.deadlineAt ?? Number.POSITIVE_INFINITY;
+
+  let llmCalls = 0;
+  let consecutiveFailures = 0;
+  let circuitOpen = false;
+  let classified = 0;
+  let stoppedForBudget = false;
 
   for (let start = 0; start < items.length; start += BATCH_SIZE) {
     const chunk = items.slice(start, start + BATCH_SIZE);
 
-    if (useLLM) {
-      const prompt = buildPrompt(chunk);
-      const llmResult = await opts.llm.complete(prompt);
+    // Cooperative deadline: defer everything after this point to the next tick.
+    if (Date.now() >= deadlineAt) {
+      break;
+    }
+
+    const budgetAvailable = llmCalls < maxLlmCalls;
+    const canUseLlm = useLLM && !circuitOpen && budgetAvailable;
+
+    if (canUseLlm) {
+      llmCalls += 1;
+      let handled = false;
+      const llmResult = await opts.llm.complete(buildPrompt(chunk));
       if (llmResult.ok) {
         const classifications = parseEnvelope(llmResult.content);
         if (classifications !== null && classifications.length === chunk.length) {
@@ -228,15 +287,45 @@ export async function classifyArticles(
               source: "llm",
             });
           });
-          continue;
+          classified += chunk.length;
+          consecutiveFailures = 0;
+          handled = true;
+        } else {
+          logger.warn("llm_classification_invalid", {
+            event: "analysis.classify",
+            batchSize: chunk.length,
+          });
         }
-        logger.warn("llm_classification_invalid", {
-          event: "analysis.classify",
-          batchSize: chunk.length,
-        });
       }
+
+      if (!handled) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= failureStreakLimit && !circuitOpen) {
+          circuitOpen = true;
+          logger.warn("llm_circuit_open", {
+            event: "analysis.classify",
+            consecutive_failures: consecutiveFailures,
+          });
+        }
+        chunk.forEach((item) => {
+          results.push({
+            articleId: item.id,
+            classification: classifyByRules(item),
+            source: "rules",
+          });
+        });
+        classified += chunk.length;
+      }
+      continue;
     }
 
+    // Budget exhausted (LLM healthy, circuit closed): defer the backlog.
+    if (useLLM && !circuitOpen && !budgetAvailable) {
+      stoppedForBudget = true;
+      break;
+    }
+
+    // Circuit open, or no LLM configured: deterministic rules, no network.
     chunk.forEach((item) => {
       results.push({
         articleId: item.id,
@@ -244,7 +333,18 @@ export async function classifyArticles(
         source: "rules",
       });
     });
+    classified += chunk.length;
   }
 
-  return results;
+  const deferred = items.length - classified;
+  return {
+    results,
+    stats: {
+      llmCalls,
+      classified,
+      deferred,
+      skippedNoBudget: stoppedForBudget ? deferred : 0,
+      circuitOpen,
+    },
+  };
 }

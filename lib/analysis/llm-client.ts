@@ -3,10 +3,10 @@ import { logger } from "@/lib/logger";
 
 /**
  * Minimal OpenAI-compatible chat-completions client. Uses `response_format:
- * {type:"json_object"}`, `temperature: 0`, a 30s `AbortController` timeout, and
- * one retry with backoff. It never throws to its caller — it returns a
- * discriminated result — and exposes `lastSuccessAt` / `lastFailureReason` for
- * the `/api/health` endpoint.
+ * {type:"json_object"}`, `temperature: 0`, a hard `LLM_TIMEOUT_MS`
+ * `AbortSignal.timeout()` per request, and one retry with backoff. It never
+ * throws to its caller — it returns a discriminated result — and exposes
+ * `lastSuccessAt` / `lastFailureReason` for the `/api/health` endpoint.
  */
 
 export type LLMResult =
@@ -52,11 +52,19 @@ export interface LLMClient {
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com/v1";
-const TIMEOUT_MS = 30_000;
 const RETRY_BACKOFF_MS = 500;
 
 interface ChatResponse {
   choices?: { message?: { content?: string } }[];
+}
+
+export interface LlmClientOptions {
+  /** Hard per-request timeout (ms). Defaults to `LLM_TIMEOUT_MS`. */
+  timeoutMs?: number;
+  /** Injectable `fetch` (tests provide a hanging/stub implementation). */
+  fetchImpl?: typeof fetch;
+  /** Retry backoff (ms). Defaults to 500; tests may set 0. */
+  retryBackoffMs?: number;
 }
 
 function extractContent(payload: unknown): string | null {
@@ -68,15 +76,16 @@ function extractContent(payload: unknown): string | null {
   return typeof content === "string" && content.length > 0 ? content : null;
 }
 
-async function post(prompt: string): Promise<{ ok: true; content: string } | { ok: false; reason: string }> {
+async function post(
+  prompt: string,
+  timeoutMs: number,
+  fetchImpl: typeof fetch,
+): Promise<{ ok: true; content: string } | { ok: false; reason: string }> {
   const baseUrl = config.llmBaseUrl ?? DEFAULT_BASE_URL;
   const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
   try {
-    const response = await fetch(url, {
+    const response = await fetchImpl(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -88,7 +97,9 @@ async function post(prompt: string): Promise<{ ok: true; content: string } | { o
         response_format: { type: "json_object" },
         messages: [{ role: "user", content: prompt }],
       }),
-      signal: controller.signal,
+      // A hard, non-resetting deadline for the request. `AbortSignal.timeout`
+      // also covers a stalled body read, unlike a bare AbortController timer.
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {
@@ -101,14 +112,16 @@ async function post(prompt: string): Promise<{ ok: true; content: string } | { o
     }
     return { ok: true, content };
   } catch (err) {
-    const reason = err instanceof Error && err.name === "AbortError" ? "timeout" : "network_error";
+    const reason =
+      err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError")
+        ? "timeout"
+        : "network_error";
     return { ok: false, reason };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
-export function createLlmClient(): LLMClient {
+export function createLlmClient(options: LlmClientOptions = {}): LLMClient {
+  const fetchImpl = options.fetchImpl ?? fetch;
   return {
     isConfigured(): boolean {
       return config.llmConfigured;
@@ -118,16 +131,22 @@ export function createLlmClient(): LLMClient {
         return { ok: false, reason: "not_configured" };
       }
 
-      const first = await post(prompt);
+      // Resolved per call so tests (and env changes) are honoured.
+      const timeoutMs = options.timeoutMs ?? config.llmTimeoutMs;
+      const retryBackoffMs = options.retryBackoffMs ?? RETRY_BACKOFF_MS;
+
+      const first = await post(prompt, timeoutMs, fetchImpl);
       if (first.ok) {
         state.lastSuccessAt = new Date();
+        state.lastFailureReason = null;
         return first;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
-      const second = await post(prompt);
+      await new Promise((resolve) => setTimeout(resolve, retryBackoffMs));
+      const second = await post(prompt, timeoutMs, fetchImpl);
       if (second.ok) {
         state.lastSuccessAt = new Date();
+        state.lastFailureReason = null;
         return second;
       }
 

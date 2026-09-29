@@ -97,6 +97,26 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * LLM-budget counters worth surfacing on the per-step log line (and, via
+ * `pipeline_jobs.context`, on `/api/pipeline/status`) so a deferred tick is
+ * diagnosable without log access.
+ */
+const LLM_COUNTER_KEYS = ["llm_calls", "classified", "deferred", "skipped_no_budget", "circuit_open"] as const;
+
+function llmCounters(context: Record<string, unknown> | undefined): Record<string, unknown> {
+  if (!context) {
+    return {};
+  }
+  const out: Record<string, unknown> = {};
+  for (const key of LLM_COUNTER_KEYS) {
+    if (key in context) {
+      out[key] = context[key];
+    }
+  }
+  return out;
+}
+
 function emptyReport(started: number, status: RunReport["status"], runId: string | null = null): RunReport {
   return {
     runId,
@@ -210,6 +230,7 @@ async function runStep(
         duration_ms: result.durationMs,
         rows_written: result.rowsWritten ?? 0,
         processed: result.processed,
+        ...llmCounters(result.context),
       });
       return result;
     } catch (err) {

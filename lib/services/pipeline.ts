@@ -36,6 +36,7 @@ export async function getPipelineStatus(): Promise<Record<string, unknown>> {
         durationMs: pipelineJobs.durationMs,
         processed: pipelineJobs.processed,
         error: pipelineJobs.error,
+        context: pipelineJobs.context,
       })
       .from(pipelineJobs)
       .where(inArray(pipelineJobs.runId, runIds))
@@ -43,7 +44,14 @@ export async function getPipelineStatus(): Promise<Record<string, unknown>> {
     : [];
   const stepsByRun = new Map<
     string,
-    Array<{ name: string; status: string; duration_ms: number | null; processed: number; error: string | null }>
+    Array<{
+      name: string;
+      status: string;
+      duration_ms: number | null;
+      processed: number;
+      error: string | null;
+      context?: Record<string, unknown>;
+    }>
   >();
   for (const job of jobRows) {
     const list = stepsByRun.get(job.runId) ?? [];
@@ -53,6 +61,10 @@ export async function getPipelineStatus(): Promise<Record<string, unknown>> {
       duration_ms: job.durationMs,
       processed: job.processed,
       error: job.error,
+      context:
+        job.context !== null && typeof job.context === "object"
+          ? (job.context as Record<string, unknown>)
+          : undefined,
     });
     stepsByRun.set(job.runId, list);
   }

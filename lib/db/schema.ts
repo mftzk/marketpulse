@@ -208,6 +208,13 @@ export const newsArticles = pgTable("news_articles", {
     onDelete: "set null",
   }),
   isPrimary: boolean("is_primary").notNull().default(false),
+  /** Validated classification committed by the classify step; enables cheap skip. */
+  classification: jsonb("classification").$type<unknown>(),
+  /** `"llm"` or `"rules"`, matching the classification above. */
+  classificationSource: text("classification_source"),
+  /** Fingerprint of the classified text; a change invalidates the stored result. */
+  classificationHash: text("classification_hash"),
+  classifiedAt: timestamp("classified_at", { withTimezone: true }),
   raw: jsonb("raw").$type<unknown>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
