@@ -12,7 +12,7 @@ import {
 import { BROAD_BENCHMARKS, SECTOR_ETF_BY_SLUG } from "@/lib/market/relative-strength";
 import { chunkRows, selectBarsAfter } from "@/lib/pipeline/market-series";
 import { earningsResult, fundamentalExpectations, macroSnapshots, marketEvents, priceSnapshots, sectors, stocks, technicalSnapshots, volumeSnapshots } from "@/lib/db/schema";
-import { configuredFeedStatus } from "@/lib/providers";
+import { configuredFeedStatus, readFundamentalTickerHealth } from "@/lib/providers";
 import type { Bar, DailyStats } from "@/lib/providers/types";
 import type { PipelineContext } from "@/lib/pipeline/context";
 import type { JobResult } from "@/lib/pipeline/registry";
@@ -207,8 +207,24 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
     // vendor adapter is total, but this barrier guarantees a fundamental/vendor
     // failure can never fail the whole market step (the tick continues on
     // price/volume data alone).
+    let fundamentalSummary: FundamentalRefreshSummary | null = null;
     try {
-      await persistFundamentals(ctx, universe.map((s) => s.ticker));
+      fundamentalSummary = await persistFundamentals(ctx, universe.map((s) => s.ticker));
+      // One structured line per refresh so a single blocked symbol (e.g. AVGO on
+      // a plan that excludes it) is visible without mislabelling the whole feed.
+      if (fundamentalSummary.attempted > 0) {
+        const payload = {
+          tickers_ok: fundamentalSummary.ok,
+          tickers_degraded: fundamentalSummary.degraded,
+          degraded_symbols: fundamentalSummary.degradedSymbols,
+          unsupported_symbols: fundamentalSummary.unsupportedSymbols,
+        };
+        if (fundamentalSummary.degraded > 0) {
+          ctx.logger.warn("fundamental_refresh_degraded", payload);
+        } else {
+          ctx.logger.info("fundamental_refresh", payload);
+        }
+      }
     } catch (err) {
       ctx.logger.warn("fundamental_persist_degraded", {
         error: err instanceof Error ? err.message : String(err),
@@ -228,6 +244,10 @@ export async function fetchMarketData(ctx: PipelineContext): Promise<JobResult> 
         skipped_tickers: skippedTickers,
         price_rows: priceRows.length,
         volume_rows: volumeRows.length,
+        fundamental_tickers_ok: fundamentalSummary?.ok ?? 0,
+        fundamental_tickers_degraded: fundamentalSummary?.degraded ?? 0,
+        fundamental_degraded_symbols: fundamentalSummary?.degradedSymbols ?? [],
+        fundamental_unsupported_symbols: fundamentalSummary?.unsupportedSymbols ?? [],
       },
     };
   } catch (err) {
@@ -414,13 +434,47 @@ async function upsertMarketRows(
   }
 }
 
+/** Universe-scoped outcome of one fundamental refresh, for logs and step context. */
+interface FundamentalRefreshSummary {
+  /** Tickers for which a live vendor health record was observed. */
+  attempted: number;
+  ok: number;
+  degraded: number;
+  degradedSymbols: string[];
+  unsupportedSymbols: string[];
+}
+
 /** Upserts expectations + earnings for the universe tickers (unchanged contract). */
-async function persistFundamentals(ctx: PipelineContext, tickers: string[]): Promise<void> {
+async function persistFundamentals(
+  ctx: PipelineContext,
+  tickers: string[],
+): Promise<FundamentalRefreshSummary> {
+  const summary: FundamentalRefreshSummary = {
+    attempted: 0,
+    ok: 0,
+    degraded: 0,
+    degradedSymbols: [],
+    unsupportedSymbols: [],
+  };
   for (const ticker of tickers) {
     const [expectations, earnings] = await Promise.all([
       ctx.providers.fundamental.expectations(ticker),
       ctx.providers.fundamental.earnings(ticker),
     ]);
+    // A live adapter (FMP) exposes per-symbol health; the mock does not. Only
+    // tickers with a record count toward the summary, so the counters are
+    // scoped to this refresh's universe.
+    const health = readFundamentalTickerHealth(ctx.providers.fundamental, ticker);
+    if (health) {
+      summary.attempted += 1;
+      if (health.coreAvailable) {
+        summary.ok += 1;
+      } else {
+        summary.degraded += 1;
+        summary.degradedSymbols.push(ticker);
+      }
+      if (health.unsupported) summary.unsupportedSymbols.push(ticker);
+    }
     for (const item of expectations) {
       await ctx.db.insert(fundamentalExpectations).values({
         ticker: item.ticker,
@@ -487,6 +541,7 @@ async function persistFundamentals(ctx: PipelineContext, tickers: string[]): Pro
       });
     }
   }
+  return summary;
 }
 
 /**

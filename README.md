@@ -141,10 +141,21 @@ reason (`fmp_source_unavailable` log line), never a rejected pipeline tick.
   date (the live `earnings` payload has no `fiscalDateEnding`). A ±3 day tolerance absorbs
   weekend/holiday shifts and `fiscalDateEnding`/`fiscalPeriodEnd` are honoured when present. A row
   that cannot be tied to a statement is dropped — the fiscal period is never guessed.
-- **Budget** — `FMP_CACHE_TTL_MS` (default 12h) caches the per-ticker load in process. The universe
-  is 8 tickers × ≤3 endpoints = ≤24 calls per refresh (≈48/day at 12h), comfortably inside a
-  250-request/day free plan. A cached ticker makes zero additional vendor calls; a degraded result is
-  cached for at most 5 minutes so it can recover.
+- **Budget** — `FMP_CACHE_TTL_MS` (default 12h) caches the per-ticker load in process. A supported
+  ticker costs at most 3 requests per refresh (`earnings` + `income-statement` + `analyst-estimates`);
+  the 7 supported universe symbols are therefore ≤21 calls per 12h window (≈42/day), comfortably
+  inside a 250-request/day free plan. A cached ticker makes zero additional vendor calls; a degraded
+  result is cached for at most 5 minutes so it can recover. (If a plan serves the annual estimate
+  fallback, that adds one extra `analyst-estimates` request for that symbol on the first load.)
+- **Per-symbol health** — health is tracked per ticker, so one symbol the plan does not cover (the
+  verified key answers `AVGO` with HTTP 402 *"not available under your current subscription"* on both
+  core endpoints) is reported as `degraded`/`unsupported` without demoting the feed: the status stays
+  `LIVE` as long as any symbol serves data, and only an outage affecting **every** attempted symbol
+  (or a configured key with no load yet) reports `UNAVAILABLE`. After the first failure an
+  unsupported symbol enters `FMP_UNSUPPORTED_COOLDOWN_MS` (default 24h) and is skipped without a
+  vendor call; transient failures (timeout/5xx/network) are retried on the next refresh. Each refresh
+  logs one `fundamental_refresh_degraded` line with `{tickers_ok, tickers_degraded, degraded_symbols}`
+  (also surfaced in `/api/pipeline/status` step context).
 - **Free-tier limits** — the free plan rejects `limit > 5` (HTTP 402), so the adapter requests
   `limit=5`; `analyst-estimates?period=quarter`, intraday charts (`historical-chart/1min`), batch
   quotes (`quote?symbol=A,B`) and `news/stock` also require a paid tier, and some symbols (e.g. the

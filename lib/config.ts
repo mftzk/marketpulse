@@ -97,6 +97,13 @@ export interface Config {
   fmpApiKey: string | null;
   /** In-process FMP fundamentals cache TTL (ms). Quarterly data — default 12h. */
   fmpCacheTtlMs: number;
+  /**
+   * How long a symbol that the FMP plan is not entitled to (premium/402/
+   * subscription) is skipped before it is retried (ms). Default 24h: an
+   * entitlement is a plan property, not a transient outage, so retrying it on
+   * every refresh only wastes the request budget.
+   */
+  fmpUnsupportedCooldownMs: number;
   pipelineAutorun: boolean;
   pipelineTickSeconds: number;
   /** Hard ceiling for a single pipeline tick (ms). Exceeded → failed, lock released. */
@@ -159,6 +166,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   const benzingaApiKey = nonEmpty(env.BENZINGA_API_KEY);
   const fmpApiKey = nonEmpty(env.FMP_API_KEY);
   const fmpCacheTtlMs = parsePositiveInt(nonEmpty(env.FMP_CACHE_TTL_MS), 43_200_000);
+  const fmpUnsupportedCooldownMs = parsePositiveInt(nonEmpty(env.FMP_UNSUPPORTED_COOLDOWN_MS), 86_400_000);
 
   const logLevel = parseLogLevel(nonEmpty(env.LOG_LEVEL));
   const pipelineTickSeconds = parsePositiveInt(nonEmpty(env.PIPELINE_TICK_SECONDS), 30);
@@ -203,6 +211,7 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     benzingaApiKey,
     fmpApiKey,
     fmpCacheTtlMs,
+    fmpUnsupportedCooldownMs,
     pipelineAutorun: parseBoolean(nonEmpty(env.PIPELINE_AUTORUN), false),
     pipelineTickSeconds,
     pipelineTickDeadlineMs,

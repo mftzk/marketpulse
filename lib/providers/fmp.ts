@@ -41,6 +41,33 @@ export interface FmpHealth {
   sources: FmpSourceHealth[];
 }
 
+/** Per-symbol vendor health. One blocked symbol must never demote the whole feed. */
+export interface FmpTickerHealth {
+  ticker: string;
+  /** At least one core endpoint responded for this symbol. */
+  coreAvailable: boolean;
+  degraded: boolean;
+  estimatesFallback: boolean;
+  /** HTTP status of the last core failure, `null` when available/never reached the vendor. */
+  status: number | null;
+  /** Machine-readable reason of the last core failure, `null` when available. */
+  reason: string | null;
+  checkedAt: Date;
+  /** The plan is not entitled to this symbol and calls are being skipped. */
+  unsupported: boolean;
+}
+
+/** Aggregate of the per-symbol health observed so far. */
+export interface FmpHealthSummary {
+  attempted: number;
+  ok: number;
+  degraded: number;
+  degradedSymbols: string[];
+  unsupportedSymbols: string[];
+  /** The feed as a whole is down (every attempted symbol failed its core endpoints). */
+  coreUnavailable: boolean;
+}
+
 interface EstimatesLoad {
   rows: Row[];
   source: string;
@@ -56,11 +83,37 @@ interface FmpData {
   reports: Row[];
   statements: Row[];
   health: FmpHealth;
+  /** HTTP status of the last core failure, for the per-ticker health record. */
+  coreStatus: number | null;
+  /** Machine-readable reason of the last core failure. */
+  coreReason: string | null;
+  /** Both core endpoints failed with a subscription/entitlement signal. */
+  unsupported: boolean;
+}
+
+/** Internal per-ticker record: the last load's health plus the failure status/reason. */
+interface TickerRecord {
+  health: FmpHealth;
+  checkedAt: Date;
+  status: number | null;
+  reason: string | null;
 }
 
 type RequestResult =
   | { ok: true; rows: Row[] }
   | { ok: false; status: number | null; reason: string };
+
+/**
+ * Reasons that mean the plan is not entitled to a symbol/endpoint. These are a
+ * permanent property of the subscription, unlike a timeout or a 5xx, so the
+ * symbol is put on a long cooldown instead of being re-requested on every
+ * refresh (which would burn the daily request budget for nothing).
+ */
+const UNSUPPORTED_REASONS = new Set(["premium_restricted", "not_entitled", "subscription_required"]);
+
+function isUnsupportedFailure(reason: string | null): boolean {
+  return reason !== null && UNSUPPORTED_REASONS.has(reason);
+}
 
 function num(value: unknown): number | null {
   const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
@@ -139,6 +192,12 @@ function matchStatement(report: Row, statements: Row[]): Row | null {
 
 function reasonForStatus(status: number, body: string): string {
   const text = body.slice(0, 200).toLowerCase();
+  // A symbol the plan is not entitled to (AVGO on the verified key) answers 402
+  // with "... not available under your current subscription". Classify it
+  // distinctly so it is treated as permanently unsupported.
+  if (text.includes("not entitled") || text.includes("not available under") || text.includes("subscription")) {
+    return "not_entitled";
+  }
   if (status === 402 || text.includes("premium") || text.includes("restricted")) return "premium_restricted";
   if (status === 401 || status === 403) return "auth_error";
   if (status === 429) return "rate_limited";
@@ -152,10 +211,12 @@ function reasonForStatus(status: number, body: string): string {
  */
 function reasonForText(body: string): string {
   const text = body.slice(0, 200).toLowerCase();
+  if (text.includes("not entitled") || text.includes("not available under") || text.includes("subscription")) {
+    return "not_entitled";
+  }
   if (
     text.includes("premium") ||
     text.includes("restricted") ||
-    text.includes("subscription") ||
     text.includes("upgrade") ||
     text.includes("not available")
   ) {
@@ -173,20 +234,96 @@ function reasonForText(body: string): string {
 export class FmpFundamentalProvider implements FundamentalDataProvider {
   private readonly cache = new Map<string, { promise: Promise<FmpData>; expiresAt: number }>();
   private readonly ttlMs: number;
-  private lastHealth: FmpHealth | null = null;
+  private readonly unsupportedCooldownMs: number;
+  /**
+   * Health is tracked PER TICKER. A single unsupported/blocked symbol (e.g. AVGO
+   * on a plan that excludes it) must never be interpreted as "the feed is down".
+   */
+  private readonly healthByTicker = new Map<string, TickerRecord>();
+  /** Ticker → epoch-ms until which vendor calls are skipped (entitlement cooldown). */
+  private readonly unsupportedUntil = new Map<string, number>();
 
-  constructor(private readonly apiKey: string | null, ttlMs: number = config.fmpCacheTtlMs) {
+  constructor(
+    private readonly apiKey: string | null,
+    ttlMs: number = config.fmpCacheTtlMs,
+    unsupportedCooldownMs: number = config.fmpUnsupportedCooldownMs,
+  ) {
     this.ttlMs = Math.max(60_000, ttlMs);
+    this.unsupportedCooldownMs = Math.max(0, unsupportedCooldownMs);
   }
 
-  /** Last observed source health, or `null` before the first load finished. */
+  /**
+   * Health of the most recently completed load, or `null` before the first load
+   * finished. Kept for diagnostics; `coreUnavailable()` uses the per-ticker map.
+   */
   health(): FmpHealth | null {
-    return this.lastHealth;
+    let latest: TickerRecord | null = null;
+    for (const record of this.healthByTicker.values()) {
+      if (!latest || record.checkedAt.getTime() >= latest.checkedAt.getTime()) latest = record;
+    }
+    return latest?.health ?? null;
   }
 
-  /** True only after a completed load where both core endpoints failed. */
+  /** Per-symbol health, or `null` when the symbol has never been loaded. */
+  tickerHealth(ticker: string): FmpTickerHealth | null {
+    const record = this.healthByTicker.get(ticker);
+    if (!record) return null;
+    return {
+      ticker,
+      coreAvailable: record.health.coreAvailable,
+      degraded: record.health.degraded,
+      estimatesFallback: record.health.estimatesFallback,
+      status: record.status,
+      reason: record.reason,
+      checkedAt: record.checkedAt,
+      unsupported: this.isUnsupported(ticker),
+    };
+  }
+
+  /** Aggregate across every symbol observed so far. */
+  healthSummary(): FmpHealthSummary {
+    let attempted = 0;
+    let ok = 0;
+    let degraded = 0;
+    const degradedSymbols: string[] = [];
+    const unsupportedSymbols: string[] = [];
+    for (const [ticker, record] of this.healthByTicker) {
+      attempted += 1;
+      if (record.health.coreAvailable) {
+        ok += 1;
+      } else {
+        degraded += 1;
+        degradedSymbols.push(ticker);
+      }
+      if (this.isUnsupported(ticker)) unsupportedSymbols.push(ticker);
+    }
+    return {
+      attempted,
+      ok,
+      degraded,
+      degradedSymbols,
+      unsupportedSymbols,
+      coreUnavailable: this.coreUnavailable(),
+    };
+  }
+
+  /**
+   * True only when the feed as a whole is down: no symbol was ever attempted
+   * with a key configured, or every attempted symbol failed its core endpoints.
+   * A single unsupported symbol among working ones never demotes the feed.
+   */
   coreUnavailable(): boolean {
-    return this.lastHealth !== null && !this.lastHealth.coreAvailable;
+    if (!this.apiKey) return false;
+    if (this.healthByTicker.size === 0) return true;
+    for (const record of this.healthByTicker.values()) {
+      if (record.health.coreAvailable) return false;
+    }
+    return true;
+  }
+
+  private isUnsupported(ticker: string): boolean {
+    const retryAt = this.unsupportedUntil.get(ticker);
+    return retryAt !== undefined && Date.now() < retryAt;
   }
 
   private async request(
@@ -254,7 +391,28 @@ export class FmpFundamentalProvider implements FundamentalDataProvider {
     return { rows: [], source: "", available: false, fallback: false, status: annual.status, reason: annual.reason };
   }
 
+  /**
+   * A symbol inside its entitlement cooldown: return an empty, clearly-degraded
+   * result without issuing any vendor request. The original failure status/reason
+   * is retained so the symbol is still reported as degraded.
+   */
+  private skippedData(ticker: string): FmpData {
+    const previous = this.healthByTicker.get(ticker);
+    return {
+      estimates: [],
+      estimatesSource: "",
+      reports: [],
+      statements: [],
+      health: { coreAvailable: false, degraded: true, estimatesFallback: false, sources: [] },
+      coreStatus: previous?.status ?? null,
+      coreReason: previous?.reason ?? "not_entitled",
+      unsupported: true,
+    };
+  }
+
   private async fetchAll(ticker: string): Promise<FmpData> {
+    if (this.isUnsupported(ticker)) return this.skippedData(ticker);
+
     const [earningsResult, statementsResult, estimates] = await Promise.all([
       this.request("earnings", ticker, { limit: ROW_LIMIT }),
       this.request("income-statement", ticker, { period: "quarter", limit: ROW_LIMIT }),
@@ -265,6 +423,20 @@ export class FmpFundamentalProvider implements FundamentalDataProvider {
 
     const earningsHealthy = earningsResult.ok;
     const statementsHealthy = statementsResult.ok;
+    const coreAvailable = earningsHealthy || statementsHealthy;
+    // Only a *permanent* entitlement failure of BOTH core endpoints marks the
+    // symbol unsupported. A timeout / 5xx / network failure is transient and is
+    // retried on the next cache miss.
+    const unsupported =
+      !coreAvailable &&
+      isUnsupportedFailure(earningsResult.reason) &&
+      isUnsupportedFailure(statementsResult.reason);
+    if (unsupported) {
+      this.unsupportedUntil.set(ticker, Date.now() + this.unsupportedCooldownMs);
+    } else if (coreAvailable) {
+      this.unsupportedUntil.delete(ticker);
+    }
+
     const sources: FmpSourceHealth[] = [
       {
         endpoint: "earnings",
@@ -286,17 +458,21 @@ export class FmpFundamentalProvider implements FundamentalDataProvider {
       },
     ];
     const health: FmpHealth = {
-      coreAvailable: earningsHealthy || statementsHealthy,
+      coreAvailable,
       degraded: sources.some((source) => source.state === "unavailable") || estimates.fallback,
       estimatesFallback: estimates.fallback,
       sources,
     };
+    const coreFailure = !earningsHealthy ? earningsResult : !statementsHealthy ? statementsResult : null;
     return {
       estimates: estimates.rows,
       estimatesSource: estimates.source,
       reports: earningsHealthy ? earningsResult.rows : [],
       statements: statementsHealthy ? statementsResult.rows : [],
       health,
+      coreStatus: coreFailure?.status ?? null,
+      coreReason: coreFailure?.reason ?? null,
+      unsupported,
     };
   }
 
@@ -308,7 +484,14 @@ export class FmpFundamentalProvider implements FundamentalDataProvider {
     this.cache.set(ticker, entry);
     void result
       .then((data) => {
-        this.lastHealth = data.health;
+        // Record health per ticker. A skipped (cooldown) load still records the
+        // symbol as degraded, but must never extend its own cooldown.
+        this.healthByTicker.set(ticker, {
+          health: data.health,
+          checkedAt: new Date(),
+          status: data.coreStatus,
+          reason: data.coreReason,
+        });
         entry.expiresAt =
           Date.now() + (data.health.coreAvailable ? this.ttlMs : Math.min(this.ttlMs, DEGRADED_CACHE_TTL_MS));
       })

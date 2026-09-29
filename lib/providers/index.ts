@@ -5,7 +5,7 @@ import { MockMarketProvider } from "@/lib/providers/market";
 import { MockNewsProvider } from "@/lib/providers/news";
 import { BenzingaNewsProvider } from "@/lib/providers/benzinga";
 import { MassiveMarketProvider } from "@/lib/providers/massive";
-import { FmpFundamentalProvider } from "@/lib/providers/fmp";
+import { FmpFundamentalProvider, type FmpTickerHealth } from "@/lib/providers/fmp";
 import type {
   FundamentalDataProvider,
   MarketDataProvider,
@@ -60,10 +60,25 @@ export function getFundamentalDataProvider(): FundamentalDataProvider {
 export type FeedStatus = "LIVE" | "DELAYED" | "STALE" | "DEMO" | "REPLAY" | "UNAVAILABLE";
 
 /**
+ * Per-symbol health for a fundamental adapter that tracks it (the FMP adapter).
+ * Returns `null` for the mock provider or any adapter without the capability,
+ * so callers can stay provider-agnostic.
+ */
+export function readFundamentalTickerHealth(
+  provider: unknown,
+  ticker: string,
+): FmpTickerHealth | null {
+  const candidate = provider as { tickerHealth?: (symbol: string) => FmpTickerHealth | null };
+  return typeof candidate?.tickerHealth === "function" ? candidate.tickerHealth(ticker) : null;
+}
+
+/**
  * Fundamental feed status as a pure decision so it can be unit-tested without a
- * live vendor. `coreUnavailable` is true only after a completed load where both
- * core endpoints (`earnings` + `income-statement`) failed — a premium quarterly
- * analyst-estimates parameter alone does not demote a working feed.
+ * live vendor. `coreUnavailable` means the feed as a whole is down: every
+ * attempted symbol failed its core endpoints (`earnings` + `income-statement`),
+ * or nothing has been attempted yet with a key configured. A premium quarterly
+ * analyst-estimates parameter, or a single symbol the plan does not cover, never
+ * demotes a feed that is serving the other symbols.
  */
 export function fundamentalFeedStatus(
   provider: "mock" | "fmp",

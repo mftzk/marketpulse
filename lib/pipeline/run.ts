@@ -116,6 +116,8 @@ const STEP_COUNTER_KEYS = [
   "truncated",
   "skipped_tickers",
   "dropped_bars",
+  "fundamental_tickers_ok",
+  "fundamental_tickers_degraded",
   "db_queries",
 ] as const;
 
