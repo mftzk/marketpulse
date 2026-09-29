@@ -23,6 +23,7 @@ export async function GET(
       data: result.data,
       page: result.page,
       generated_at: new Date().toISOString(),
+      meta: { hidden_demo_events: result.hidden },
     });
   } catch (err) {
     return errorResponse(err);

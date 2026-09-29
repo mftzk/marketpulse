@@ -20,7 +20,7 @@ export default async function ReplayPage() {
   const latest = await safeCall(
     "replay.latest",
     () => listEvents({ limit: 1, offset: 0, sort: "published_desc" }),
-    { data: [], page: EMPTY_PAGE },
+    { data: [], page: EMPTY_PAGE, hidden: 0 },
   );
 
   const detectedDate = latest.data[0]?.published_at

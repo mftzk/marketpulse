@@ -79,6 +79,17 @@ function parsePositiveInt(value: string | null, fallback: number): number {
   return parsed.data;
 }
 
+function parseNonNegativeInt(value: string | null, fallback: number): number {
+  if (value === null) {
+    return fallback;
+  }
+  const parsed = intSchema.safeParse(value);
+  if (!parsed.success || parsed.data < 0) {
+    return fallback;
+  }
+  return parsed.data;
+}
+
 export interface Config {
   databaseUrl: string | null;
   databaseConfigured: boolean;
@@ -146,6 +157,21 @@ export interface Config {
   pipelineMaxEventsPerTick: number;
   /** Timeout applied to every vendor HTTP request (ms). */
   providerHttpTimeoutMs: number;
+  /**
+   * When on (default), the live events feed (`GET /api/events`, its totals and
+   * pagination) excludes *demo-origin* events: an event whose canonical article
+   * is missing or whose `news_articles.data_status` is not `LIVE`. Set to `0`
+   * to restore the pre-phase-16 behaviour (demo rows visible in the feed).
+   * Reversible: the rows stay in the database (and in `/replay`); only the feed
+   * serving layer changes.
+   */
+  feedLiveOnly: boolean;
+  /**
+   * When `feedLiveOnly` is on, allow at most this many of the newest
+   * demo-origin events back into the feed for visual richness (0 = none).
+   * Ignored when `feedLiveOnly` is off.
+   */
+  feedDemoMaxItems: number;
   logLevel: LogLevel;
   appUrl: string | null;
   isProduction: boolean;
@@ -197,6 +223,8 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
   const pipelineMaxEventsPerTick = parsePositiveInt(nonEmpty(env.PIPELINE_MAX_EVENTS_PER_TICK), 40);
   const providerHttpTimeoutMs = parsePositiveInt(nonEmpty(env.PROVIDER_HTTP_TIMEOUT_MS), 8_000);
   const newsLookbackMinutes = parsePositiveInt(nonEmpty(env.NEWS_LOOKBACK_MINUTES), 240);
+  const feedLiveOnly = parseBoolean(nonEmpty(env.FEED_LIVE_ONLY), true);
+  const feedDemoMaxItems = parseNonNegativeInt(nonEmpty(env.FEED_DEMO_MAX_ITEMS), 0);
 
   // Auth is enabled unless explicitly disabled. A missing/short secret never
   // throws at import time (that would break `next build`, which has no runtime
@@ -240,6 +268,8 @@ export function loadConfig(env: Record<string, string | undefined> = readEnv()):
     pipelineMaxEventsPerTick,
     providerHttpTimeoutMs,
     newsLookbackMinutes,
+    feedLiveOnly,
+    feedDemoMaxItems,
     logLevel,
     appUrl,
     isProduction: nonEmpty(env.NODE_ENV) === "production",

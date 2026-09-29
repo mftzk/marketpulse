@@ -28,7 +28,7 @@ export default async function DashboardPage() {
   const events = await safeCall(
     "dashboard.events",
     () => listEvents({ limit: SSR_EVENT_LIMIT, offset: 0, sort: "impact_desc" }),
-    { data: [], page: EMPTY_PAGE },
+    { data: [], page: EMPTY_PAGE, hidden: 0 },
   );
 
   const health = await safeCall<HealthView | null>(

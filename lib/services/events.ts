@@ -1,7 +1,10 @@
-import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, or, sql, type SQL } from "drizzle-orm";
 
+import { config } from "@/lib/config";
 import type { EventType } from "@/lib/core/event-types";
 import { EVENT_TYPE_LABELS } from "@/lib/core/event-types";
+import { logger } from "@/lib/logger";
+import { buildFeedOriginCondition, feedOriginPolicy } from "@/lib/services/feed-origin";
 import type { EventCardDTO, ImpactBand, ListPage } from "@/lib/core/dto";
 import type { EventDetailDTO, IntradayMarkerDTO, SourceDTO } from "@/lib/core/detail";
 import type { EventFilters } from "@/lib/core/filters";
@@ -133,6 +136,19 @@ function buildWhere(filters: EventFilters, now: Date): ReturnType<typeof and> | 
   return parts.length > 0 ? and(...parts) : undefined;
 }
 
+/**
+ * Combines the user filters with the feed-origin condition (phase 16) so both
+ * the page query and its `count(*)` share the exact same WHERE clause. Any
+ * undefined clause is ignored.
+ */
+function combineWhere(...conditions: (SQL | undefined)[]): SQL | undefined {
+  const present = conditions.filter((condition): condition is SQL => condition !== undefined);
+  if (present.length === 0) {
+    return undefined;
+  }
+  return and(...present);
+}
+
 function baseQuery() {
   return getDb()
     .select({
@@ -255,30 +271,58 @@ function unavailableImpact(): EventCardDTO["impact"] {
 export interface ListEventsResult {
   data: EventCardDTO[];
   page: ListPage;
+  /**
+   * Demo-origin events excluded by the feed origin filter for this filtered
+   * set (0 when `FEED_LIVE_ONLY` is off). Observability only — the API exposes
+   * it under `meta.hidden_demo_events`; the response shape is unchanged.
+   */
+  hidden: number;
 }
 
 export async function listEvents(filters: EventFilters): Promise<ListEventsResult> {
   const db = getDb();
   const now = new Date();
-  const where = buildWhere(filters, now);
+  const policy = feedOriginPolicy(config);
+  const baseWhere = buildWhere(filters, now);
+  const origin = buildFeedOriginCondition(policy);
+  const where = combineWhere(baseWhere, origin);
 
   const query = baseQuery();
   if (where) {
     query.where(where);
   }
 
+  // One aggregate query yields both the visible total (the origin-filtered
+  // count) and the unfiltered total, so `hidden` is diagnosable without a
+  // second round-trip. `baseWhere` deliberately omits the origin clause.
   const countQuery = db
-    .select({ count: sql<number>`count(*)::int` })
+    .select({
+      all: sql<number>`count(*)::int`,
+      visible: origin
+        ? sql<number>`(count(*) filter (where ${origin}))::int`
+        : sql<number>`count(*)::int`,
+    })
     .from(marketEvents)
     .leftJoin(companies, eq(marketEvents.companyId, companies.id))
     .leftJoin(sectors, eq(marketEvents.sectorId, sectors.id))
     .leftJoin(impactScores, eq(impactScores.eventId, marketEvents.id))
     .leftJoin(newsArticles, eq(marketEvents.canonicalArticleId, newsArticles.id))
     .leftJoin(newsSources, eq(newsArticles.sourceId, newsSources.id));
-  if (where) {
-    countQuery.where(where);
+  if (baseWhere) {
+    countQuery.where(baseWhere);
   }
-  const total = (await countQuery)[0]?.count ?? 0;
+  const countRow = (await countQuery)[0];
+  const total = countRow?.visible ?? 0;
+  const hidden = Math.max(0, (countRow?.all ?? 0) - total);
+  if (policy.liveOnly) {
+    logger.debug("events_feed_origin_filter", {
+      event: "events.feed_origin",
+      live_only: policy.liveOnly,
+      demo_max_items: policy.demoMaxItems,
+      visible_total: total,
+      hidden_demo_events: hidden,
+    });
+  }
 
   switch (filters.sort) {
     case "published_desc":
@@ -438,6 +482,7 @@ export async function listEvents(filters: EventFilters): Promise<ListEventsResul
       has_more: hasMore,
       total,
     },
+    hidden,
   };
 }
 

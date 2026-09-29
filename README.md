@@ -165,6 +165,27 @@ reason (`fmp_source_unavailable` log line), never a rejected pipeline tick.
 The market and news slots remain on their mocks (`MARKET_PROVIDER=mock`, `NEWS_PROVIDER=mock`) while
 FMP fundamentals run live.
 
+### Live feed vs archived demo data
+
+The seed writes a deterministic demo dataset (and `NEWS_MODE=backfill` replays it). Those rows stay
+in the database and back the `/replay` archive, but the **live dashboard feed must show real news
+only**. An event is *live-origin* when its canonical article exists and
+`news_articles.data_status = 'LIVE'`; an event with no canonical article, or any other status
+(`DEMO`, `REPLAY`, …), is *demo-origin*. `market_events` has no status column of its own — it is
+derived from the canonical article via the same join the events read layer already uses.
+
+Two reversible switches control the feed serving layer (`lib/services/feed-origin.ts`); the pipeline
+and the stored rows are untouched:
+
+| Var | Default | Meaning |
+|---|---|---|
+| `FEED_LIVE_ONLY` | `1` | When on, `GET /api/events` and its `page.total`/pagination exclude demo-origin events. Set to `0` to restore the previous (unfiltered) feed exactly. |
+| `FEED_DEMO_MAX_ITEMS` | `0` | When live-only, allow at most this many of the *newest* demo-origin events back into the feed (e.g. `10`). Ignored when `FEED_LIVE_ONLY=0`. |
+
+`GET /api/replay` and `/replay` are deliberately **not** filtered — they surface the archive. Search
+and the per-ticker event list keep working; a ticker with only demo events returns an empty list. The
+events response adds `meta.hidden_demo_events` (observability; the shape is otherwise unchanged).
+
 ---
 
 ## Authentication
